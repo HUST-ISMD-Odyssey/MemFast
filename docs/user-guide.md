@@ -8,6 +8,12 @@ inputs `[..., input_features]` and returns `[..., output_features]`.
 The last dimension is the reduction dimension. Leading dimensions are flattened
 into read vectors for one invocation.
 
+For a non-network application with `A[N,K]` and `B[K,O]`,
+`Simulator.map(B.T)(A)` simulates `A @ B`. Keep the programmed module when
+reusing `B` so later calls perform reads without reprogramming its weights.
+Quantization, slicing, ADC conversion and the selected nonidealities apply
+equally to matrix and neural-network applications.
+
 ```python
 import torch
 from memfast import Config, Simulator, convert_model
@@ -19,10 +25,30 @@ y = array(torch.randn(2, 16, 256, device=sim.device))
 analog = convert_model(model.eval(), sim, exclude=("classifier",))
 ```
 
-`convert_model` copies the model, converts eligible `Linear` and `Conv2d`
+`convert_model` copies the model, converts eligible `Linear`, `Conv2d`, RNN and GRU
 modules, and places the result on the simulator device. `inplace=True` edits
 the supplied model. Exclusion paths refer to named modules and include their
 descendants. Unknown paths raise an error.
+
+All supported layers are converted unless `include` restricts the scope.
+`include=None` means all; `include=()` means none. Inclusion selects named
+modules and their descendants, while `exclude` takes precedence. An excluded
+alias of a shared module keeps that shared module digital.
+A shared module is converted only when all its aliases are included; inspect
+aliases with `model.named_modules(remove_duplicate=False)` when selecting them.
+
+```python
+from torch import nn
+
+eligible = [
+    name for name, layer in model.named_modules() if isinstance(layer, (nn.Linear, nn.Conv2d))
+]
+analog = convert_model(model, sim, include=eligible[:4], exclude=(eligible[-1],))
+```
+
+Construct the digital architecture, load its original checkpoint, then convert.
+The [MLP tutorial](../examples/02_mlp_mnist.py) shows each step, with no
+pretrained model required.
 
 Convolution uses PyTorch unfolding and one matrix per convolution group;
 stride, dilation, numeric padding, and groups are preserved. Unfolding can be
@@ -43,7 +69,7 @@ the updated digital weights again.
 ### Layers, Models, And Training
 
 `memfast.nn` contains inference layers (`AnalogLinear`, `AnalogConv2d`),
-recurrent layers (`AnalogRNNCell`, `AnalogRNN`), trainable layers
+recurrent RNN/GRU layers, trainable layers
 (`HATLinear`, `HATConv2d`), conversion, and read-event utilities.
 `memfast.models` supplies MLP and recurrent classifiers, CIFAR and ImageNet
 architecture factories, and local language-model and detector loaders.
@@ -62,13 +88,17 @@ forward invocation. The forward values follow the same physical model as
 inference. Default surrogate gradients use dequantized grouped inputs and
 weights, with identity derivatives through their quantizers. Set
 `gradient_mode="digital"` to use unquantized layer derivatives instead.
+The surrogate computation uses FP32, including when the physical forward uses
+wide INT or BFP reconstruction. Tutorials use FP32 master parameters. The
+layer API preserves source parameter dtype, so leaf gradients accumulate in
+that dtype when a caller supplies a different one.
 Neither option differentiates the noise, faults, or ADC response.
 Convolution gradients use unfolded patches directly. Optimizer parameters and
 registered buffers keep stable identities for distributed training.
 
-Converted recurrent networks preserve stacked and bidirectional RNN execution,
-hidden states, and the upstream tanh or ReLU nonlinearity. See the examples for
-training, distributed launch, architecture construction, and checkpoint loading.
+Converted recurrent networks preserve stacked and bidirectional execution,
+hidden states, the RNN tanh/ReLU nonlinearity and PyTorch GRU gate equations.
+See the numbered examples for architecture construction and checkpoint loading.
 
 ## Quantization And Physical Parallelism
 
@@ -78,7 +108,8 @@ PyTorch weights `[O, K]` are transposed internally.
 | Parameter | Meaning | Default |
 | --- | --- | --- |
 | `activation_bits` | Signed activation precision | `8` |
-| `weight_bits` | Signed weight precision | `8` |
+| `weight_bits` | Weight code precision | `8` |
+| `weight_signed` | Two's-complement (`True`) or unsigned (`False`) weight reconstruction | `True` |
 | `array_size=(R,C)` | Physical array rows and output columns | `(64,64)` |
 | `rows_per_read=P` | Maximum physical rows summed before each ADC | `None`, meaning `R` |
 | `weight_quant_gran=(QK,QO)` | Rectangular weight region sharing one scale | `(None,1)` |
@@ -95,6 +126,65 @@ INT quantization uses `scale = max(abs(group)) / (2**(bits-1)-1)` and nearest-ev
 rounding. Codes range from `-(2**(bits-1)-1)` to `2**(bits-1)-1`. All-zero groups
 produce zero codes. Negative codes are stored in two's complement; the most
 significant bit has negative significance.
+
+### Imported Affine Weights And Static Inputs
+
+`Simulator.map_quantized` accepts existing integer codes without estimating
+new weight scales. Codes use PyTorch weight layout `[O,K]`; scales and zero
+points must broadcast to that shape. Expand a checkpoint's per-group values
+using its actual group index before mapping.
+
+```python
+config = Config(
+    activation_bits=8,
+    weight_bits=4,
+    weight_signed=False,
+    array_size=(128, 64),
+    rows_per_read=32,
+    input_quant_gran=(1, 32),
+    weight_quant_gran=(32, 1),
+)
+sim = Simulator(config, device="cuda:0")
+codes = torch.randint(0, 16, (64, 128))  # Replace with decoded checkpoint codes.
+scales = torch.full((64, 128), 0.025)
+zero_points = torch.full((64, 128), 8)
+array = sim.map_quantized(codes, scales, zero_points=zero_points)
+y = array(torch.randn(1, 128, device=sim.device))
+```
+
+An affine weight is `w = scale * (q - zero_point)`. With unsigned weights,
+all weight slice significances are positive, including the most significant
+slice. For example, `weight_slice=(2,2)` represents a four-bit unsigned code
+using factors 4 and 1; signed weights require a separate one-bit sign slice.
+Activation codes remain signed and have no zero point.
+
+For each read, the analog path evaluates the integer product with `q`.
+The digital path subtracts
+`weight_scale * zero_point * sum(quantized_input * input_scale)`.
+It uses the same activation codes as the analog path. This correction does
+not cancel array noise or ADC clipping. Both scale and zero point must stay
+constant along each individual ADC read; incompatible imported groups are
+rejected rather than silently requantized. Set `rows_per_read` to an aligned
+group subdivision when necessary. Imported weights use INT (`bw_e=None`).
+Unsigned mapping of floating nonnegative matrices is also supported; use the
+integer import API for affine weights that represent negative values.
+
+By default, input scales are estimated per invocation. To use calibrated
+scales instead:
+
+```python
+array.set_input_scale(0.015)  # One fixed scale for all features and vectors.
+# Or supply [1,K] scales that are constant inside every analog read.
+y = array(inputs)
+torch.save(array.state_dict(), "calibrated_matrix.pt")
+array.set_input_scale(None)  # Restore dynamic scale estimation.
+```
+
+Fixed-scale inference still rounds and clips each activation into integer
+codes; it skips online scale estimation. Scales are buffers saved with the
+programmed integer weights. Calibrate on a representative training subset,
+then evaluate separately. A complete LeNet example covers calibration,
+checkpoint export and inference from the saved artifact.
 
 Physical array dimensions and quantization groups describe separate operations.
 Examples for `array_size=(64,64)`:
@@ -233,7 +323,8 @@ currents near an ADC boundary.
 ## Nonidealities
 
 Set any combination through `Config(nonidealities=Nonidealities(...))`.
-All effects default to zero.
+Only `write_variation=0.02` is enabled by default. All other effect magnitudes
+default to zero. `Nonidealities(write_variation=0)` selects ideal devices.
 
 ```python
 from memfast import Config, Nonidealities, Simulator

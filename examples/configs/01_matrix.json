@@ -1,0 +1,15 @@
+{
+  "model": {"in_features": 128, "out_features": 80, "vectors": 8},
+  "conversion": {},
+  "simulator": {
+    "array_size": [128, 128],
+    "rows_per_read": 32,
+    "weight_quant_gran": [32, 1],
+    "input_quant_gran": [1, 32],
+    "input_slice": [1, 1, 2, 2, 2],
+    "weight_slice": [1, 1, 2, 2, 2],
+    "adc_bits": [6, 7, 7, 8, 8],
+    "nonidealities": {"write_variation": 0.02}
+  },
+  "run": {"device": "cpu", "mode": "default", "seed": 135}
+}

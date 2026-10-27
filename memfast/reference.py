@@ -61,6 +61,11 @@ def adc(current, config, weight_slice=0):
 
 
 def partial(q, packed, config, schedule, seed, event, begin, end):
+    """Restore ADC counts using signed input and configured weight significance.
+
+    Weight digits are always physical nonnegative conductance states. Their
+    signed or unsigned interpretation enters only through the layout factors.
+    """
     ni = config.nonidealities
     n, m, r = q.shape
     p, c = packed.shape[1], config.array_size[1]

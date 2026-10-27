@@ -65,6 +65,11 @@ def atomic_write(path, content):
 
 
 def source(config):
+    """Embed layout factors, including weight signedness, in cached CUDA source.
+
+    Both the PTX content hash and Config-keyed in-memory cache distinguish signed
+    and unsigned weight reconstruction; activation significance stays signed.
+    """
     ni = config.nonidealities
     drift = (1 + ni.drift_time / ni.drift_reference_time) ** (-ni.drift_coefficient)
     values = dict(

@@ -3,11 +3,16 @@
 Master weights and biases are ordinary Parameters used by the surrogate graph.
 Each invocation reprograms persistent analog buffers from those parameters;
 parameter and buffer identities remain stable for optimizers and DDP.
+Surrogate arithmetic and its derivatives use FP32, including wide/BFP mapping
+and autocast contexts. Quantization and programmed scale buffers retain their
+physical precision. Leaf gradients accumulate in their Parameters' own dtype.
 
 The default ``quantized`` mode follows the legacy HAT quantized-operand
 convention: dx uses dequantized weights, dw uses dequantized inputs, and the
 quantizer itself has identity derivatives. ``digital`` differentiates the
 unquantized digital layer instead. Neither mode differentiates device effects.
+Activations remain signed; weight operands follow ``Config.weight_signed``.
+Unsigned HAT requires nonnegative master weights on every programming step.
 
 Conv2d quantizes unfolded patches and each group's physical [K,O] weights.
 Its gradients use those patches directly. The old Conv2d implementation first
@@ -21,7 +26,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from ..quantization import grouped_quantize
-from .layers import AnalogConv2d
+from .convolution import AnalogConv2d
 
 
 class _SurrogateGradient(torch.autograd.Function):
@@ -57,26 +62,33 @@ def _validate_gradient_mode(mode):
     return mode
 
 
-def _quantized_operand(value, bits, granularity, config):
-    dtype = torch.float64 if config.wide else torch.float32
-    operand = value.to(dtype)
+def _quantized_operand(value, bits, granularity, config, reference=None, *, signed=True):
+    operand = value.float()
     if value.numel() == 0:
         return operand
     with torch.no_grad():
-        code, scale = grouped_quantize(value.detach(), bits, granularity, config.bw_e)
-        dequantized = code * scale.to(dtype)
+        original = value if reference is None else reference
+        code, scale = grouped_quantize(
+            original.detach(), bits, granularity, config.bw_e, signed=signed
+        )
+        dequantized = (code * scale).float()
     return operand + (dequantized - operand).detach()
 
 
-def _quantized_linear(x, weight, bias, config):
+def _quantized_linear(x, weight, bias, config, input_reference=None):
     input_operand = _quantized_operand(
         x.reshape(-1, weight.shape[1]),
         config.activation_bits,
         config.input_quant_gran,
         config,
+        reference=None if input_reference is None else input_reference.reshape(-1, weight.shape[1]),
     )
     weight_operand = _quantized_operand(
-        weight.T, config.weight_bits, config.weight_quant_gran, config
+        weight.T,
+        config.weight_bits,
+        config.weight_quant_gran,
+        config,
+        signed=config.weight_signed,
     )
     output = input_operand @ weight_operand
     if bias is not None:
@@ -104,14 +116,16 @@ class TrainableAnalogLinear(nn.Module):
         self.train(source.training)
 
     def forward(self, x):
-        _program(self.matrix, self.weight, self.bias)
-        analog = self.matrix(x.detach())
-        if not torch.is_grad_enabled():
-            return analog
-        if self.gradient_mode == "quantized":
-            surrogate = _quantized_linear(x, self.weight, self.bias, self.matrix.config)
-        else:
-            surrogate = F.linear(x, self.weight, self.bias)
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            _program(self.matrix, self.weight, self.bias)
+            analog = self.matrix(x.detach())
+            if not torch.is_grad_enabled():
+                return analog
+            if self.gradient_mode == "quantized":
+                surrogate = _quantized_linear(x, self.weight, self.bias, self.matrix.config)
+            else:
+                bias = None if self.bias is None else self.bias.float()
+                surrogate = F.linear(x.float(), self.weight.float(), bias)
         return _SurrogateGradient.apply(analog, surrogate)
 
 
@@ -145,6 +159,10 @@ class TrainableAnalogConv2d(nn.Module):
         self.train(source.training)
 
     def forward(self, x):
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            return self._forward(x)
+
+    def _forward(self, x):
         per_group = self.out_channels // self.groups
         for group, matrix in enumerate(self.analog.matrices):
             sl = slice(group * per_group, (group + 1) * per_group)
@@ -153,13 +171,21 @@ class TrainableAnalogConv2d(nn.Module):
         analog = self.analog(x.detach())
         if not torch.is_grad_enabled():
             return analog
+        original = x.detach()
+        x = x.float()
         padding = self.padding
         if self.padding_mode != "zeros":
             ph, pw = padding
             x = F.pad(x, (pw, pw, ph, ph), mode=self.padding_mode)
+            original = F.pad(original, (pw, pw, ph, ph), mode=self.padding_mode)
             padding = (0, 0)
         if self.gradient_mode == "quantized":
             patches = F.unfold(x, self.kernel_size, self.dilation, padding, self.stride)
+            reference = (
+                patches.detach()
+                if original.dtype == torch.float32
+                else F.unfold(original, self.kernel_size, self.dilation, padding, self.stride)
+            )
             size = self.weight[0].numel()
             values = []
             for group, matrix in enumerate(self.analog.matrices):
@@ -171,11 +197,15 @@ class TrainableAnalogConv2d(nn.Module):
                         self.weight[sl].flatten(1),
                         bias,
                         matrix.config,
+                        input_reference=reference[:, group * size : (group + 1) * size].transpose(
+                            1, 2
+                        ),
                     )
                 )
             surrogate = torch.cat(values, dim=-1).transpose(1, 2).reshape(analog.shape)
         else:
+            bias = None if self.bias is None else self.bias.float()
             surrogate = F.conv2d(
-                x, self.weight, self.bias, self.stride, padding, self.dilation, self.groups
+                x, self.weight.float(), bias, self.stride, padding, self.dilation, self.groups
             )
         return _SurrogateGradient.apply(analog, surrogate)

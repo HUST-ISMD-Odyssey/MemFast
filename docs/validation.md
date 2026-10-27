@@ -1,87 +1,99 @@
 # Validation
 
-The 0.2.0 release was checked on October 27, 2026, using a separate environment
-with Python 3.13, PyTorch 2.10.0 and torchvision 0.25.0. Optional integration
-checks used timm 1.0.16, transformers 5.8.0, lm-evaluation-harness 0.4.10 and
-Ultralytics 8.4.176. CPU-only checks also ran with PyTorch 2.5.1.
+Validation on October 27, 2026 used Python 3.13, PyTorch 2.10.0+cu130 and
+torchvision 0.25.0. Optional task checks used transformers 5.8.0,
+timm 1.0.16, lm-evaluation-harness 0.4.10 and Ultralytics 8.4.176.
+CPU checks also ran with PyTorch 2.5.1.
 
-The built wheel was installed and imported from its environment's
-`site-packages`, outside the source tree. All 328 tests passed there, including
-CUDA and optional integrations, with no skipped cases. A separate BFP YOLO
-smoke check and dependency consistency check also passed.
+Numerical tests and raw execution receipts are maintained outside the public
+source tree. They cover independent integer/dequantization oracles, CPU/CUDA
+agreement, physical tails, scale restoration per ADC read, INT/BFP,
+10/16/20-bit precision, dynamic slices, heterogeneous ADC widths, nonideal
+sampling, state replay, full/partial conversion, shared layers, grouped
+convolution, RNN/GRU states and FP32 HAT surrogate arithmetic.
+Schedule checks cover exhaustive declared-domain traversal, measured argmin,
+persistent cache reuse and resource fallback. The VGG notebook provides a
+separate accuracy experiment over explicitly declared nonideality grids.
 
-## Numerical Coverage
+## LeNet-5 / MNIST
 
-The automated tests compare the simulator with independent integer-dot-product
-and grouped-dequantization calculations. They cover:
+The included [checkpoint](../examples/checkpoints/README.md) was trained
+from scratch using all 60,000 MNIST training images, 8 epochs, batch 128,
+Adam at 0.001, seed 135 and FP32 digital execution. Test normalization is
+`(x-0.5)/0.5`, with no augmentation.
 
-- Physical arrays and shorter ADC reads, including `R=128,P=32`, logical tails,
-  nondivisible physical reads, and scale restoration before accumulation.
-- Tensor, channel and rectangular group quantization for inputs and weights.
-- INT and BFP, mixed activation/weight precision, 10-, 16- and 20-bit data,
-  binary slicing, and multibit layouts including `(1,1,2,2,2)`.
-- Uniform and per-weight-slice ADC resolutions, nearest-even rounding,
-  saturation, sign slices and S-shaped ADC response.
-- Programming/read/voltage/output noise, read sampling modes, stuck-at faults,
-  drift, deterministic replay, large random coordinates and read-event values.
-- Subnormal quantization scales, finite results with extreme scale factors,
-  wide slice cells, closely spaced conductances and extreme physical constants.
-- Checkpoint restoration, shared parameters, grouped and depthwise convolution,
-  recurrent states, HAT gradient calculations and distributed training.
-- Complete tuning-domain coverage, strict measured argmin selection, persistent
-  cache reuse, corrupt cache entries and recovery from cached resource failures.
+| Evaluation | Samples | Correct | Top-1 |
+| --- | ---: | ---: | ---: |
+| Digital FP32 | 10,000 | 9,849 | 98.49% |
+| Default CIM | 10,000 | 9,850 | 98.50% |
 
-CPU and CUDA use the same physical model. Their floating reduction orders can
-differ at ADC boundaries. Schedule changes within CUDA are checked for exact
-output equality for the same input and random event.
-
-## Example Workflows
-
-Thirty-two execution checks cover the matrix, model conversion, nonideality,
-MLP, HAT, two-process DDP, checkpoint reload, recurrent, vision, detection and
-language-model entry points. Vision smoke checks execute the complete named
-architecture, including VGG, ResNet, MobileNetV2 and DeiT. Llama, Qwen2 and Qwen3
-checks use tiny upstream decoders and run perplexity, generation and the actual
-HFLM harness adapter against an in-memory task.
-
-These smoke checks use synthetic inputs or random weights. They establish
-workflow execution and output validity. Model accuracy requires a matching
-pretrained checkpoint and task dataset.
-
-The VOC validation API also ran on two explicitly synthetic annotated images
-and an untrained 20-class detector. Prediction, dataset loading, label matching
-and AP calculation executed; its scores are not pretrained VOC accuracy.
-
-## Real Data
-
-The following inference checks use pretrained checkpoints and actual data.
-The analog configuration is signed A8W8 INT, binary slices, 64-by-64 arrays,
-ADC6, per-output-channel weight scales, per-vector input scales, and zero
-nonidealities.
-
-| Model and data | Samples | Analog top-1 |
-| --- | ---: | ---: |
-| VGG11-BN, CIFAR-10 test | 10,000 | 92.79% |
-| ResNet18, CIFAR-10 test | 10,000 | 94.60% |
-| DeiT-Tiny, ImageNet validation subset | 32 | 93.75% |
-
-The ImageNet row is a limited workflow check on the first 32 sorted validation
-images, not an estimate of complete ImageNet accuracy.
-
-VGG11-BN digital top-1 was 92.78%. Its complete analog logits retained SHA-256
-`7ca4cdac7917dc5da11582ac3cedbc1e0ae57ff8aa9618b69f6f017841ec9072`,
-matching the earlier validated default, tuned and cached runs.
-The existing [nonideality scan tables](../examples/results/README.md) retain
-their measured configurations and sample counts.
-
-## Reproducing Checks
+CIM uses A8W8 INT, binary slices, 64x64 arrays, 64 rows per ADC read,
+ADC6, per-vector input scales and per-output-channel weight scales.
+Only write variation is enabled, at 0.02, with seed 135.
+These scores are a fixed realization; their small difference does not imply
+that programming variation improves accuracy generally.
 
 ```bash
-python -m pip install -e ".[dev,models]"
-python -m pytest -q
+python examples/03_lenet5_mnist.py --device cuda:0 --data-root data --digital
+python examples/03_lenet5_mnist.py --device cuda:0 --data-root data
 ```
 
-CUDA cases run when a CUDA device is available. The [example guide](../examples/README.md)
-provides commands and checkpoint/data requirements for each workflow.
-Execution checks ran with shared device load; this report makes no throughput
-comparison between models or scheduling choices.
+## BERT / SQuAD
+
+The pretrained local `csarron/bert-base-uncased-squad-v1` checkpoint was
+evaluated on the first 32 SQuAD v1 validation questions: **EM 87.50,
+F1 96.5625**. There were 32 tokenized features. This limited real-data
+workflow check is not a complete SQuAD score.
+
+The model uses FP32, context length 384, document stride 128, batch 4,
+and the same default CIM configuration as above. The example performs
+context-offset answer reconstruction, including overflow windows.
+
+```bash
+python examples/14_bert_squad.py --device cuda:0 \
+  --checkpoint /path/to/bert-base-uncased-squad-v1 \
+  --data-file /path/to/squad/validation.parquet --limit 32 --batch-size 4
+```
+
+## Static Quantization
+
+The bundled static LeNet artifact contains signed INT4 weights and calibrated
+INT8 input scales for all five CIM matrices. Calibration used 1,024 MNIST
+training images, seed 135. Evaluation on all 10,000 test images gave
+**98.35% (9,835 correct)** with ADC6 and write variation 0.02.
+Reloading with batch 97 reproduced the score with zero online scale-estimation
+calls. The original FP32 weights are not required for inference.
+
+## Guided Notebooks
+
+All five notebooks were executed privately. Published notebooks retain their
+code and observed summaries with execution outputs cleared.
+
+| Workflow | Evaluation scope | Observed result |
+| --- | --- | --- |
+| Custom MLP | All 10,000 MNIST test images | Digital 96.61%; ideal CIM 96.65%; write-0.02 CIM 96.65% |
+| MobileNetV2 | First 128 ImageNet validation images | Digital 88.28%; all CIM 86.72%; first convolution/head digital 87.50% |
+| DFT denoising | Fixed 64x64 photograph | Noisy 17.5205 dB; NumPy 18.4623 dB; ideal/write-0.02 CIM 18.4523 dB |
+| VGG nonidealities | Same 512 CIFAR-10 test images, 59 unique CIM configurations | Digital 93.945%; default CIM 94.141%; write-0.20 CIM 66.406% |
+| VGG mixed precision | Same 512 images, 30 configurations plus custom ADC example | ADC8/write-0.02: uniform 8-bit 94.141%; uniform 4-bit 92.969%; editable mixed policy 94.336% |
+
+VGG uses the pretrained VGG11-BN checkpoint
+`cifar10_vgg11_bn-eaeebf42.pt`, SHA-256
+`eaeebf42370c92fdfbb5dbe8eba7c27d4eb7366a1dca0b5be435364ccdf54378`.
+The editable policy assigns eight bits to the first two convolutions and final
+classifier, and four bits to the remaining mapped layers. These single-seed
+subset comparisons do not establish general accuracy improvements from noise
+or mixed precision.
+
+## Scope
+
+Synthetic workflow checks establish execution and finite outputs, not model
+accuracy. Optional language checks use tiny Llama, Qwen2, Qwen3 and Qwen3.5 decoders,
+including the live HFLM adapter. Full pretrained ImageNet, VOC, Speech Commands
+and language task-suite accuracy are not claimed by those smoke runs.
+Their data/checkpoint requirements and commands are in the
+[example guide](../examples/README.md).
+
+The environment, compiled caches, training records, test suite and executed
+notebooks are retained for maintainer review; they are not bundled into the
+public source release.

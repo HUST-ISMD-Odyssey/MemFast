@@ -22,7 +22,7 @@ def nonnegative(value, name):
 class Nonidealities:
     """Dimensionless noise magnitudes; retention times are in seconds."""
 
-    write_variation: float = 0.0
+    write_variation: float = 0.02
     read_variation: float = 0.0
     read_mode: str = "shared"
     voltage_variation: float = 0.0
@@ -48,7 +48,11 @@ class Nonidealities:
 
 @dataclass(frozen=True)
 class Config:
-    """Matrices use [reduction rows, output columns] for geometry and scale groups."""
+    """Matrices use [reduction rows, output columns] for geometry and scale groups.
+
+    Activations use signed two's complement significance. ``weight_signed=False``
+    uses unsigned INT weight codes and positive significance for every slice.
+    """
 
     activation_bits: int = 8
     weight_bits: int = 8
@@ -65,12 +69,17 @@ class Config:
     input_slice: tuple[int, ...] | None = None
     weight_slice: tuple[int, ...] | None = None
     bw_e: int | None = None
+    weight_signed: bool = True
 
     def __post_init__(self):
         integer(self.activation_bits, "activation_bits", 2, 32)
         integer(self.weight_bits, "weight_bits", 2, 32)
+        if type(self.weight_signed) is not bool:
+            raise ValueError("weight_signed must be a boolean")
         if self.bw_e is not None:
             integer(self.bw_e, "bw_e", 2, 11)
+            if not self.weight_signed:
+                raise ValueError("unsigned weights require INT quantization (bw_e=None)")
         for name, bits in (
             ("input_slice", self.activation_bits),
             ("weight_slice", self.weight_bits),
@@ -84,7 +93,10 @@ class Config:
                     widths = tuple(operator.index(item) for item in original)
                 except (TypeError, ValueError):
                     raise ValueError(f"{name} must contain integer slice widths") from None
-                if not widths or widths[0] != 1 or sum(widths) != bits:
+                signed = name == "input_slice" or self.weight_signed
+                if not widths or sum(widths) != bits:
+                    raise ValueError(f"{name} slice widths must sum to {bits}")
+                if signed and widths[0] != 1:
                     raise ValueError(
                         f"{name} must start with a one-bit sign slice and sum to {bits}"
                     )
@@ -180,11 +192,11 @@ class Config:
         return math.ceil(self.array_size[0] / self.read_rows)
 
     @staticmethod
-    def _layout(widths, bits):
+    def _layout(widths, bits, signed=True):
         widths = (1,) * bits if widths is None else widths
         result, shift = [], 0
         for index, width in enumerate(reversed(widths)):
-            factor = -(1 << shift) if index == len(widths) - 1 else 1 << shift
+            factor = -(1 << shift) if signed and index == len(widths) - 1 else 1 << shift
             result.append((shift, (1 << width) - 1, factor))
             shift += width
         return tuple(result)
@@ -195,7 +207,7 @@ class Config:
 
     @property
     def weight_layout(self):
-        return self._layout(self.weight_slice, self.weight_bits)
+        return self._layout(self.weight_slice, self.weight_bits, self.weight_signed)
 
     @property
     def wide(self):

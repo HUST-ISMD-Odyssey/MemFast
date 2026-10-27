@@ -1,0 +1,7 @@
+{
+  "model": {"model": "vgg11_bn", "num_classes": 10},
+  "conversion": {},
+  "simulator": {},
+  "run": {"stage": "train", "device": "cuda:0", "epochs": 10, "batch_size": 128,
+          "save_checkpoint": "examples/output/vgg11_bn_cifar10.pt"}
+}

@@ -1,215 +1,234 @@
-# Examples
+# Examples And Notebooks
 
-Run commands from the repository root after `python -m pip install -e .`.
-PyTorch and torchvision are standard dependencies. Install optional
-integrations with `python -m pip install -e ".[models]"` for DeiT, local
-Hugging Face language models, lm-evaluation-harness, and Ultralytics detection.
-Individual optional packages can also be installed separately.
+Run from the repository root after `python -m pip install -e .`.
+PyTorch and torchvision are standard dependencies. Speech, DeiT, Hugging Face
+and YOLO integrations use optional libraries:
+`python -m pip install -e ".[models]"`.
+MLP, LeNet, CIFAR and torchvision ImageNet examples need no extra.
 
-| Entry point | Task |
+## Choose A Starting Point
+
+**Notebooks** teach an end-to-end workflow in small, consecutive steps, with
+intermediate outputs and plots. Open them in Jupyter and run cells in order.
+Install JupyterLab and Matplotlib in the same environment as MemFast.
+
+| Notebook | What it demonstrates |
 | --- | --- |
-| `matrix.py` | Matrix programming, INT/BFP, slices, ADCs, geometry and scale groups |
-| `model.py` | Small convolutional model conversion |
-| `nonidealities.py` | Independent device-effect examples |
-| `mnist.py` | MNIST MLP training and inference |
-| `mlp_hat.py` | MNIST hardware-aware training |
-| `mlp_hat_ddp.py` | Distributed hardware-aware training with torchrun |
-| `cifar.py` | VGG/ResNet evaluation and digital fine-tuning on CIFAR-10/100 |
-| `imagenet.py` | VGG, ResNet, MobileNetV2 or DeiT ImageFolder evaluation |
-| `rnn.py` | Recurrent MNIST row-sequence training and inference |
-| `llama_lm_eval.py` | Local Llama/Qwen generation, perplexity and harness tasks |
-| `yolo_voc.py` | Ultralytics YOLO inference and VOC validation |
-| `cifar10.py` | Existing pretrained VGG11-BN nonideality scan |
+| [01_custom_model_mnist](notebooks/01_custom_model_mnist.ipynb) | Define dimensions, train digitally, save/load a checkpoint, compare digital, ideal-device CIM and noisy CIM |
+| [02_pretrained_mobilenet_imagenet](notebooks/02_pretrained_mobilenet_imagenet.ipynb) | Load an upstream model, evaluate full CIM, retain the first layer and classifier digitally, compare accuracy |
+| [03_dft_image_denoising](notebooks/03_dft_image_denoising.ipynb) | Map a complex DFT into real CIM matrices, filter image noise, compare reconstructions and PSNR |
+| [04_vgg_nonidealities](notebooks/04_vgg_nonidealities.ipynb) | Explain device models and sampling, scan individual/joint effects and read/scale granularity |
+| [05_vgg_mixed_precision](notebooks/05_vgg_mixed_precision.ipynb) | Choose 8/4-bit activations and weights by layer name, override ADC widths and compare accuracy |
 
-## Synthetic Smoke Runs
+**Numbered Python examples** run complete tasks from the command line. They
+support repeatable evaluation, explicit arguments and JSON configurations.
+They use the same public APIs as the notebooks. Model construction,
+checkpoint loading and CIM conversion remain visible in each task source;
+`common/` shares data, checkpoint and metric utilities.
 
-`--smoke` uses synthetic inputs and small sample counts. MLP and recurrent
-examples also reduce hidden dimensions. Vision examples retain the named
-upstream architecture. Language-model smoke runs create a tiny random decoder
-and an in-memory harness task; YOLO creates an untrained upstream architecture.
-Smoke results are marked `synthetic: true` and are execution checks.
+| Example | Purpose |
+| --- | --- |
+| `01_matrix.py` | Matrix programming, INT/BFP, dynamic slices, per-slice ADC and scale groups |
+| `02_mlp_mnist.py` | Custom three-layer MLP, checkpoint restoration, full/partial CIM and HAT |
+| `03_lenet5_mnist.py` | LeNet-5 and the supplied MNIST checkpoint |
+| `04_lenet5_mnist_static_quant.py` | Training-set calibration, saved INT4 weights/fixed activation scales and inference |
+| `05_vgg_cifar_training.py` | Software VGG training and checkpoint creation |
+| `06_vgg_cifar.py` | CIFAR VGG checkpoint loading and CIM inference |
+| `07_resnet_cifar.py` | CIFAR ResNet checkpoint loading and CIM inference |
+| `08_vgg_imagenet.py` | Pretrained torchvision VGG inference |
+| `09_resnet_imagenet.py` | Pretrained torchvision ResNet inference |
+| `10_mobilenetv2_imagenet.py` | Pretrained MobileNetV2 inference |
+| `11_deit_imagenet.py` | Pretrained timm DeiT inference |
+| `12_gru_speech.py` | Speech Commands GRU and single-WAV inference |
+| `13_yolo_voc.py` | Ultralytics detector and local VOC AP evaluation |
+| `14_bert_squad.py` | Pretrained BERT QA, answer reconstruction and SQuAD EM/F1 |
+| `15_llm_lm_eval.py` | Llama/Qwen perplexity, generation and harness evaluation |
 
-```bash
-python -m examples.matrix --smoke
-python -m examples.mnist --smoke
-python -m examples.mlp_hat --smoke
-python -m examples.mlp_hat_ddp --smoke
-python -m examples.rnn --smoke
-python -m examples.cifar --model vgg11_bn --smoke --digital
-python -m examples.cifar --model resnet18 --smoke --digital
-python -m examples.imagenet --model mobilenet_v2 --smoke --digital
-python -m examples.imagenet --model deit_tiny_patch16_224 --smoke --digital
-python -m examples.llama_lm_eval --family llama --smoke
-python -m examples.llama_lm_eval --family qwen2 --smoke
-python -m examples.yolo_voc --smoke --digital
-```
+Vision inference files concentrate on loading and evaluation. The separate VGG
+training tutorial explains software training. MLP and LeNet retain
+`--stage train|inference|hat` for custom-model and HAT workflows.
+HAT uses analog forward values and FP32 master weights/surrogate backward.
+Speech, detection and language examples are inference-only: they do not
+implement the upstream task training loops.
 
-Remove `--digital` from a vision smoke command to exercise analog conversion
-of the entire architecture. The small matrix, MLP, HAT and recurrent smoke
-commands use analog execution by default.
+## Configuration
 
-## Matrix Configuration
+JSON files live together in `examples/configs/`, named after their example.
+They share a four-group schema, but architecture and task settings differ:
 
-```bash
-python -m examples.matrix --activation-bits 10 --weight-bits 10 \
-  --input-slice 1,3,3,3 --weight-slice 1,4,5 --adc-bits 6,8,10 \
-  --array-size 16,32 --rows-per-read 4 \
-  --input-quant-gran none,4 --weight-quant-gran 4,2
+| Group | Contents |
+| --- | --- |
+| `model` | Architecture, dimensions, checkpoint or upstream weights |
+| `conversion` | Named `include` and `exclude` paths |
+| `simulator` | Physical/quantization `Config` fields and nested `nonidealities` |
+| `run` | Device, data, stage, optimizer and execution mode |
 
-python -m examples.matrix --activation-bits 16 --weight-bits 16 \
-  --input-slice 1,5,5,5 --weight-slice 1,5,5,5 --bw-e 8 \
-  --adc-bits 12 --array-size 32,64 --rows-per-read 8 \
-  --input-quant-gran 2,8 --weight-quant-gran 8,4
-```
-
-Bit widths range from 2 through 32, subject to the engine's signed 64-bit
-accumulator bound. Slice tuples are MSB first, begin with a one-bit sign
-slice, and sum to the corresponding bit width. Omit `--bw-e` for INT;
-specifying an exponent width selects BFP. `--adc-bits` accepts a scalar
-shared by all weight slices or a comma-separated tuple with exactly one
-entry per weight slice in MSB-first order.
-
-`--array-size` is physical rows and columns. `--rows-per-read` sets the
-physical rows participating in each ADC read. Quantization groups use two
-comma-separated sizes; `none` spans the corresponding dimension. Inputs
-use `[vectors, reduction]` groups and weights use `[reduction, outputs]`.
-Output includes the actual configuration, replay check and error relative
-to the original floating-point matrix product.
-
-## MNIST And Hardware-Aware Training
-
-Train a digital model and evaluate its converted counterpart:
+JSON is optional. Command-line options override its values. Relative paths
+are resolved from the working directory; the supplied LeNet checkpoint is
+resolved relative to the example directory.
 
 ```bash
-python -m examples.mnist --train --download --data-root data/mnist \
-  --epochs 10 --save-checkpoint results/mnist.pt
-python -m examples.mnist --data-root data/mnist --checkpoint results/mnist.pt
+python examples/01_matrix.py --config examples/configs/01_matrix.json
+python examples/03_lenet5_mnist.py --config examples/configs/03_lenet5_mnist.json \
+  --data-root data --exclude classifier.4
 ```
 
-Hardware-aware training uses trainable master parameters, analog forward
-values, and quantized-operand surrogate gradients by default. Select
-`--gradient-mode digital` explicitly for unquantized surrogate gradients.
-`--digital` instead trains and evaluates the original PyTorch network.
+Only write variation is enabled by default, at 0.02.
+`--write-variation 0` selects ideal devices, while quantization and ADC remain
+active. Slice widths are MSB first, begin with a one-bit sign slice and sum
+to the selected precision. ADC widths can be uniform or per weight slice.
+Omit `--bw-e` for INT; set it for BFP.
 
 ```bash
-python -m examples.mlp_hat --download --data-root data/mnist \
-  --epochs 10 --write-variation 0.02 --save-checkpoint results/mnist_hat.pt
-python -m examples.mnist --data-root data/mnist --checkpoint results/mnist_hat.pt
-
-torchrun --standalone --nproc-per-node=2 -m examples.mlp_hat_ddp \
-  --data-root data/mnist --epochs 10 --save-checkpoint results/mnist_ddp.pt
-torchrun --standalone --nproc-per-node=2 -m examples.mlp_hat_ddp --smoke --limit 3
+python examples/01_matrix.py --activation-bits 20 --weight-bits 20 \
+  --input-slice 1,3,4,4,4,4 --weight-slice 1,3,4,4,4,4 \
+  --bw-e 8 --adc-bits 16 --write-variation 0
 ```
 
-Each process receives a training shard. Evaluation shards visit each sample
-exactly once, even with uneven sample counts. Metrics are reduced across
-ranks, and rank zero saves master weights and reports results. Pass the same
-`--hidden-sizes` when loading a custom MLP architecture. Smoke MLPs use a
-single hidden layer of size 16.
+The [manual](../docs/user-guide.md) defines array geometry, per-read scale
+alignment, quantization groups, nonidealities and cache behavior.
 
-## CIFAR And ImageNet
+## Full And Partial Conversion
 
-CIFAR models require a matching task checkpoint, or `--train` to train or
-fine-tune. Checkpoints load strictly. VGG uses the legacy three-layer CIFAR
-classifier; ResNet uses the legacy unpadded 3-by-3 stem without max pooling.
+Build a digital model, load its checkpoint, then convert:
+
+```python
+model = ThreeLayerMLP(hidden_sizes=(512, 128))
+load_checkpoint(model, checkpoint)
+engine = Simulator(Config(), device="cuda:0")
+analog = convert_model(model, engine, include=("fc1", "fc2"))
+```
+
+The classifier `fc3` remains digital. Without `include`, every supported layer
+converts. `exclude` takes precedence; named paths include descendants.
+Use `model.named_modules()` to inspect names.
+
+The supplied LeNet has five eligible layers. Select the first four while
+retaining its final classifier:
 
 ```bash
-python -m examples.cifar --model vgg16_bn --num-classes 100 \
-  --data-root data/cifar --checkpoint checkpoints/vgg16_bn_cifar100.pt
-python -m examples.cifar --model resnet18 --num-classes 10 \
-  --data-root data/cifar --checkpoint checkpoints/resnet18_cifar10.pt
-python -m examples.cifar --model vgg16_bn --num-classes 100 --train --download \
-  --data-root data/cifar --epochs 10 --save-checkpoint results/vgg16_bn_cifar100.pt
+python examples/03_lenet5_mnist.py --device cuda:0 --data-root data \
+  --include features.0 features.3 classifier.0 classifier.2
 ```
 
-The ImageNet root is the evaluation split itself, arranged as
-`val/class_name/image.JPEG`. Class directories must match the checkpoint's
-class index order. The class count is checked. `--weights DEFAULT` explicitly
-requests upstream pretrained weights and their evaluation transforms.
-Local torchvision checkpoints use standard resize/crop and ImageNet
-normalization; DeiT uses timm's resolved data configuration.
+## MLP And LeNet Checkpoints
+
+The MLP source defines its three Linear layers directly. Restore the same
+hidden dimensions used for training:
 
 ```bash
-python -m examples.imagenet --model resnet50 --weights DEFAULT --data-root data/imagenet/val
-python -m examples.imagenet --model vgg16_bn --checkpoint checkpoints/vgg16_bn.pt \
-  --data-root data/imagenet/val
-python -m examples.imagenet --model mobilenet_v2 --weights DEFAULT --data-root data/imagenet/val
-python -m examples.imagenet --model deit_base_patch16_224 --weights DEFAULT \
-  --data-root data/imagenet/val
+python examples/02_mlp_mnist.py --stage train --device cuda:0 \
+  --download --data-root data --epochs 8 --batch-size 128 \
+  --hidden-sizes 512 128 --save-checkpoint examples/output/mlp_mnist.pt
+python examples/02_mlp_mnist.py --device cuda:0 --data-root data \
+  --checkpoint examples/output/mlp_mnist.pt --hidden-sizes 512 128
+python examples/02_mlp_mnist.py --stage hat --device cuda:0 --data-root data \
+  --checkpoint examples/output/mlp_mnist.pt --epochs 2 \
+  --save-checkpoint examples/output/mlp_mnist_hat.pt
 ```
 
-New classification examples emit actual sample counts, top-1/top-5 fractions,
-cross entropy, training history, and configuration metadata. Use `--limit 32`
-for limited real-data evaluation and `--output results/task.json` to retain
-results. Random initialization is permitted for synthetic smoke checks
-and explicit training.
-
-## Recurrent Classification
-
-MNIST images become 28 timesteps of 28 features. The digital model uses
-`torch.nn.RNN`; conversion maps recurrent input/hidden projections and the
-classification head to MemFast.
+LeNet's architecture is in `memfast/models/lenet.py`: two Conv2d layers, Tanh
+and average pooling, followed by three Linear layers producing raw logits.
+It is adapted to 28x28 input. The default
+`examples/checkpoints/lenet5_mnist.pt` achieved **98.49% digital** and
+**98.50% default CIM** accuracy on all 10,000 MNIST test images. See
+[validation](../docs/validation.md) for the configuration.
 
 ```bash
-python -m examples.rnn --train --download --data-root data/mnist \
-  --epochs 10 --save-checkpoint results/rnn.pt
-python -m examples.rnn --data-root data/mnist --checkpoint results/rnn.pt
+python examples/03_lenet5_mnist.py --device cuda:0 --download --data-root data
+python examples/03_lenet5_mnist.py --device cuda:0 --data-root data --digital
+python examples/03_lenet5_mnist.py --stage train --device cuda:0 --data-root data \
+  --epochs 8 --batch-size 128
+python examples/03_lenet5_mnist.py --stage hat --device cuda:0 --data-root data \
+  --epochs 1 --save-checkpoint examples/output/lenet5_mnist_hat.pt
 ```
 
-`--hidden-size` and `--num-layers` must match the checkpoint. Training here
-uses the digital recurrent model before analog inference.
+LeNet training and HAT save under `examples/output/` unless
+`--save-checkpoint` specifies another path. Pass the resulting path with
+`--checkpoint` to evaluate your trained model. Default inference loads the
+released checkpoint. User checkpoints may be anywhere; `checkpoints/` contains
+only the two released tutorial assets.
 
-## Local Language Models
+## Vision
 
-Use a local Hugging Face directory containing configuration, tokenizer, and
-weights for Llama, Qwen2 or Qwen3. Loading uses `local_files_only=True` and
-does not enable remote model code. Attention and generation use transformers.
-The vocabulary head stays digital by default; `--analog-head` converts it too.
+CIFAR VGG is `CifarVGG` in `memfast/models/vision.py`, with the earlier
+three-layer classifier. CIFAR ResNet uses the earlier unpadded 3x3 stem and no
+max pooling. Both construct the architecture and load task weights strictly
+before conversion. CIFAR-100 uses `--num-classes 100`; ImageNet weights do not
+substitute for CIFAR weights.
 
 ```bash
-python -m examples.llama_lm_eval --checkpoint checkpoints/llama \
-  --text-file data/evaluation.txt --max-length 512 --stride 256 \
-  --output results/llama_ppl.json
-python -m examples.llama_lm_eval --checkpoint checkpoints/qwen \
-  --prompt "Explain analog computing in one sentence." --max-new-tokens 32
-python -m examples.llama_lm_eval --checkpoint checkpoints/llama \
-  --tasks hellaswag,arc_easy --num-fewshot 0 --limit 32
+python examples/05_vgg_cifar_training.py --device cuda:0 --download \
+  --data-root data/cifar --epochs 10 --save-checkpoint examples/output/vgg_cifar.pt
+python examples/06_vgg_cifar.py --device cuda:0 --data-root data/cifar \
+  --checkpoint examples/output/vgg_cifar.pt
+python examples/07_resnet_cifar.py --device cuda:0 --data-root data/cifar \
+  --checkpoint /path/to/resnet18_cifar10.pt
+python examples/08_vgg_imagenet.py --device cuda:0 --weights DEFAULT --data-root data/imagenet/val
+python examples/09_resnet_imagenet.py --device cuda:0 --weights DEFAULT --data-root data/imagenet/val
+python examples/10_mobilenetv2_imagenet.py --device cuda:0 --weights DEFAULT --data-root data/imagenet/val
+python examples/11_deit_imagenet.py --device cuda:0 --weights DEFAULT --data-root data/imagenet/val
 ```
 
-Perplexity uses overlapping context windows and counts every next-token
-target once. With `--text-file`, `--limit` caps input tokens; with `--tasks`,
-it caps harness documents per task. Named harness tasks use their own data
-sources. The `--smoke` path runs the actual HFLM adapter and harness against
-four in-memory multiple-choice documents, without downloading task data.
+ImageNet models come from torchvision or timm. `--weights DEFAULT` explicitly
+requests upstream weights and preprocessing. `--checkpoint PATH` loads local
+weights instead. The data root is an ImageFolder evaluation split arranged as
+`val/class_name/image.JPEG`, with the checkpoint's class index ordering.
+`--limit 32` is a limited workflow check, not complete ImageNet accuracy.
+CIFAR weights are user supplied or produced by the training tutorial.
 
-## VOC Detection
+## Speech And Detection
 
-Supply a local Ultralytics detector checkpoint with 20 VOC classes and a local
-Ultralytics dataset YAML pointing to prepared images and YOLO-format labels.
-Dataset class names and ordering must match the checkpoint.
+The GRU tutorial preserves the two-layer Speech Commands model and its feature
+preprocessing. Use the earlier matching checkpoint containing `state_dict`,
+class names and normalization statistics. It is not an unrelated vanilla RNN.
 
 ```bash
-python -m examples.yolo_voc --checkpoint checkpoints/yolo_voc.pt \
-  --data-yaml data/voc.yaml --split test --limit 32 --output results/voc.json
+python examples/12_gru_speech.py --device cuda:0 \
+  --checkpoint /path/to/gru_speech_commands.pt --data-root data/speech
+python examples/12_gru_speech.py --device cuda:0 \
+  --checkpoint /path/to/gru_speech_commands.pt --wav sample.wav
+python examples/13_yolo_voc.py --device cuda:0 \
+  --checkpoint /path/to/yolo_voc.pt --data-yaml data/voc.yaml
 ```
 
-Ultralytics handles decoding, suppression and validation. Results report its
-AP50 and AP50:95 metrics. `--limit` creates a temporary deterministic image
-list. The synthetic smoke path uses the same upstream prediction API and
-reports detection counts.
+Speech Commands v0.02 needs its `testing_list.txt`; WAV input is mono 16 kHz.
+The detector needs a checkpoint trained for VOC's 20 classes and an
+Ultralytics dataset YAML. It resolves local data without dataset downloads,
+fuses Conv/BatchNorm before conversion and invokes upstream AP evaluation.
 
-## Existing CIFAR-10 Scan
+## BERT And Language Models
 
-The existing numerical scan remains available:
+BERT/SQuAD loads a local QA checkpoint and fast tokenizer, converts the
+network, then reconstructs answer spans using context offsets and overflow
+windows. SQuAD v1 JSON and Hugging Face parquet inputs are supported.
 
 ```bash
-python examples/cifar10.py --download --limit 10000
-python examples/cifar10.py --download --scan all --output results/cifar10
-python examples/cifar10.py --checkpoint checkpoints/cifar10_vgg11_bn-eaeebf42.pt \
-  --scan read_slice_pair --save-outputs
+python examples/14_bert_squad.py --device cuda:0 \
+  --checkpoint /path/to/bert-base-uncased-squad-v1 \
+  --data-file /path/to/squad/validation.parquet --limit 32
+python examples/15_llm_lm_eval.py --device cuda:0 \
+  --checkpoint /path/to/llama --text-file data/evaluation.txt
+python examples/15_llm_lm_eval.py --device cuda:0 \
+  --checkpoint /path/to/qwen --tasks hellaswag --limit 100
 ```
 
-It loads pretrained VGG11-BN weights, checks the download hash, and evaluates
-the actual selected CIFAR-10 test samples. CSV, metadata, Markdown tables and
-optional raw logits go to the output directory. Its `top1` CSV field is a
-percentage. Measured full-test tables remain in [results](results/README.md).
+Language checkpoints contain config, weights and tokenizer. These loaders
+disable downloads and remote-code execution. The language head is digital
+by default. Evaluation supports a local text corpus or task suites through
+lm-evaluation-harness.
+See [validation](../docs/validation.md) for measured scope and conditions.
+
+## Small Execution Checks
+
+`--smoke` uses synthetic inputs or tiny random models and reports
+`synthetic: true`. It checks execution, not task accuracy.
+
+```bash
+python examples/01_matrix.py --smoke
+python examples/02_mlp_mnist.py --stage hat --smoke --hidden-sizes 16 8
+python examples/03_lenet5_mnist.py --smoke
+python examples/06_vgg_cifar.py --smoke --digital
+python examples/10_mobilenetv2_imagenet.py --smoke --digital
+python examples/15_llm_lm_eval.py --family qwen2 --smoke
+```

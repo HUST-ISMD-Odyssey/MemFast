@@ -7,8 +7,12 @@ build/
 dist/
 .venv/
 data/
-/results/
+/results/*/raw/
 *.pt
+!/examples/checkpoints/lenet5_mnist.pt
+!/examples/checkpoints/lenet5_mnist_static_int4.pt
+/examples/output/
+/examples/notebooks/output/
 *.pth
 *.bin
 *.so

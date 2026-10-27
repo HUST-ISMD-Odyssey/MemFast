@@ -1,0 +1,6 @@
+{
+  "model": {"model": "vgg11_bn", "weights": "DEFAULT"},
+  "conversion": {"include": null, "exclude": []},
+  "simulator": {"nonidealities": {"write_variation": 0.02}},
+  "run": {"stage": "inference", "device": "cuda:0", "batch_size": 16}
+}

@@ -13,7 +13,14 @@ from torch import nn
 
 from . import reference
 from .config import Config
-from .quantization import input_tiles, weight_tiles
+from .quantization import (
+    check_read_scales,
+    expanded_parameter,
+    input_tiles,
+    pack_weight,
+    read_starts,
+    weight_tiles,
+)
 
 
 def default_schedule(config):
@@ -105,6 +112,20 @@ class Simulator:
             name = f"matrix.{self._next_id}"
             self._next_id += 1
         return AnalogMatrix(weight, self, bias=bias, name=name)
+
+    def map_quantized(self, codes, scales, *, zero_points=None, bias=None, name=None):
+        """Import integer [O,K] weights as ``scales * (codes - zero_points)``.
+
+        Scales and zero points broadcast to [O,K]. They must remain constant
+        along each ADC read. No weight scale is estimated during this import.
+        Set ``Config(weight_signed=False)`` for unsigned integer codes.
+        """
+        if name is None:
+            name = f"matrix.{self._next_id}"
+            self._next_id += 1
+        return AnalogMatrix(
+            codes, self, bias=bias, name=name, scales=scales, zero_points=zero_points
+        )
 
     def report(self):
         return dict(
@@ -270,20 +291,66 @@ class Simulator:
 
 
 class AnalogMatrix(nn.Module):
-    """Programmed signed matrix. One forward call is one read event."""
+    """Programmed matrix with optional digital zero-point compensation."""
 
-    def __init__(self, weight, simulator, *, bias=None, name="matrix"):
+    def __init__(
+        self, weight, simulator, *, bias=None, name="matrix", scales=None, zero_points=None
+    ):
         super().__init__()
-        if weight.ndim != 2 or min(weight.shape) < 1 or not weight.is_floating_point():
-            raise ValueError("weight must be a nonempty floating [O,K] matrix")
+        if weight.ndim != 2 or min(weight.shape) < 1:
+            raise ValueError("weight must be a nonempty [O,K] matrix")
         if not torch.isfinite(weight).all():
             raise ValueError("weights must be finite")
         self.simulator, self.config, self.name = simulator, simulator.config, name
         self.out_features, self.in_features = weight.shape
         self.p = math.ceil(self.out_features / self.config.array_size[1])
-        packed, scale = weight_tiles(weight.detach().to(simulator.device), self.config)
+        dtype = torch.float64 if self.config.wide else torch.float32
+        zero_correction = None
+        if scales is None:
+            if not weight.is_floating_point():
+                raise ValueError("unquantized weight must be floating")
+            if zero_points is not None:
+                raise ValueError("zero_points requires imported integer codes and scales")
+            packed, scale = weight_tiles(weight.detach().to(simulator.device), self.config)
+        else:
+            if weight.dtype not in (torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64):
+                raise ValueError("imported weight codes must have an integer dtype")
+            if self.config.bw_e is not None:
+                raise ValueError("native INT weight import requires bw_e=None")
+            lower = -(1 << (self.config.weight_bits - 1)) if self.config.weight_signed else 0
+            upper = (1 << (self.config.weight_bits - int(self.config.weight_signed))) - 1
+            imported_codes = weight.detach().to(device=simulator.device, dtype=torch.int64)
+            if (imported_codes < lower).any() or (imported_codes > upper).any():
+                raise ValueError("weight codes exceed configured signedness or bit width")
+            code = imported_codes.T.contiguous()
+            scale_full = (
+                expanded_parameter(
+                    scales, weight.shape, simulator.device, dtype, "scales", positive=True
+                )
+                .detach()
+                .T.contiguous()
+            )
+            check_read_scales(scale_full, self.config, "weight scale")
+            packed, scale = pack_weight(code, scale_full, self.config)
+            if zero_points is not None:
+                zeros = (
+                    expanded_parameter(
+                        zero_points, weight.shape, simulator.device, dtype, "zero_points"
+                    )
+                    .detach()
+                    .T.contiguous()
+                )
+                check_read_scales(zeros, self.config, "weight zero point")
+                r = self.config.array_size[0]
+                starts = read_starts(math.ceil(self.in_features / r), self.config, code.device)
+                indices = starts.clamp_max(self.in_features - 1)
+                zero_correction = -(zeros[indices] * scale_full[indices])
+                if not torch.isfinite(zero_correction).all():
+                    raise ValueError("scaled zero points exceed the reconstruction dtype")
         self.register_buffer("packed", packed)
         self.register_buffer("weight_scale", scale)
+        self.register_buffer("zero_correction", zero_correction)
+        self.register_buffer("input_scale", None)
         if bias is not None and (
             not bias.is_floating_point()
             or bias.shape != (self.out_features,)
@@ -298,10 +365,75 @@ class AnalogMatrix(nn.Module):
             .to(device=simulator.device, dtype=torch.float64 if self.config.wide else torch.float32)
             .clone(),
         )
+        if self.bias is not None and not torch.isfinite(self.bias).all():
+            raise ValueError("bias exceeds the reconstruction dtype")
         self._event = 0
         tag = int.from_bytes(hashlib.sha256(name.encode()).digest()[:4], "little")
         self.seed = self.config.seed ^ tag
         self._prepared = {}
+
+    def set_input_scale(self, scale):
+        """Fix symmetric activation scales for subsequent calls; None restores dynamic scales.
+
+        A scalar or [1,K] tensor is shared across all input vectors. The saved
+        scales must be positive and constant within each analog read.
+        """
+        if scale is None:
+            self.input_scale = None
+        else:
+            dtype = torch.float64 if self.config.wide else torch.float32
+            expanded = expanded_parameter(
+                scale, (1, self.in_features), self.packed.device, dtype, "input scale"
+            ).detach()
+            if (expanded <= 0).any():
+                raise ValueError("input scale must be strictly positive")
+            check_read_scales(expanded.T, self.config, "input scale")
+            self.input_scale = expanded.clone()
+        self._prepared.clear()
+        return self
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        packed = state_dict.get(prefix + "packed")
+        if packed is not None:
+            if not torch.is_tensor(packed) or packed.dtype not in (
+                torch.uint8,
+                torch.int8,
+                torch.int16,
+                torch.int32,
+                torch.int64,
+            ):
+                raise ValueError("checkpoint packed weights must have an integer dtype")
+            integer_codes = packed.to(torch.int64)
+            if (integer_codes < 0).any() or (
+                integer_codes > (1 << self.config.weight_bits) - 1
+            ).any():
+                raise ValueError("checkpoint packed weights exceed the configured bit width")
+        scales = state_dict.get(prefix + "weight_scale")
+        if scales is not None and (
+            not torch.is_tensor(scales)
+            or not scales.is_floating_point()
+            or not torch.isfinite(scales).all()
+            or (scales < 0).any()
+        ):
+            raise ValueError("checkpoint weight scales must be finite and nonnegative")
+        # Optional buffers acquire their serialized shape before PyTorch copies them.
+        for name in ("input_scale", "zero_correction"):
+            key = prefix + name
+            if key in state_dict and self._buffers[name] is None:
+                self._buffers[name] = torch.empty_like(state_dict[key], device=self.packed.device)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+        if not torch.isfinite(self.weight_scale).all() or (self.weight_scale < 0).any():
+            raise ValueError("checkpoint weight scales exceed the reconstruction dtype")
+        if self.bias is not None and not torch.isfinite(self.bias).all():
+            raise ValueError("checkpoint bias exceeds the reconstruction dtype")
+        if self.input_scale is not None:
+            self.set_input_scale(self.input_scale)
+        if self.zero_correction is not None:
+            expected = (self.weight_scale.shape[0], self.out_features)
+            if tuple(self.zero_correction.shape) != expected:
+                raise ValueError("checkpoint zero-point correction has an invalid shape")
+            if not torch.isfinite(self.zero_correction).all():
+                raise ValueError("checkpoint zero-point correction must be finite")
 
     def _apply(self, fn, recurse=True):
         programmed = {name: buffer for name, buffer in self._buffers.items() if buffer is not None}
@@ -315,12 +447,23 @@ class AnalogMatrix(nn.Module):
         return self
 
     def get_extra_state(self):
-        return dict(config=asdict(self.config), name=self.name, seed=self.seed, event=self._event)
+        return dict(
+            config=asdict(self.config),
+            in_features=self.in_features,
+            out_features=self.out_features,
+            name=self.name,
+            seed=self.seed,
+            event=self._event,
+        )
 
     def set_extra_state(self, state):
+        for key in ("in_features", "out_features"):
+            if key in state and (type(state[key]) is not int or state[key] != getattr(self, key)):
+                raise ValueError("checkpoint logical matrix dimensions differ")
         loaded_config = dict(state["config"])
         for name in ("rows_per_read", "input_slice", "weight_slice", "bw_e"):
             loaded_config.setdefault(name, None)
+        loaded_config.setdefault("weight_signed", True)
         if loaded_config != asdict(self.config):
             raise ValueError("checkpoint physical configuration differs")
         if type(state["seed"]) is not int or not 0 <= state["seed"] < 2**32:
@@ -360,6 +503,31 @@ class AnalogMatrix(nn.Module):
                 value = value * self.weight_scale[None, :, begin:end, :]
             output[:, begin * c : end * c] = value.sum(1).flatten(1)
         output = output[:, : self.out_features].contiguous()
+        if self.zero_correction is not None:
+            # The same quantized input drives both the analog product and its
+            # digital zero-point correction, including partially filled reads.
+            bits = self.config.activation_bits
+            signed = q.to(torch.int64).reshape(q.shape[0], -1)
+            signed = (signed ^ (1 << (bits - 1))) - (1 << (bits - 1))
+            r, step = self.config.array_size[0], self.config.read_rows
+            padded = torch.nn.functional.pad(
+                signed.reshape(q.shape[0], -1, r),
+                (0, self.config.reads_per_array * step - r),
+            )
+            sums = padded.reshape(q.shape[0], -1, step).sum(-1)
+            dtype = output.dtype
+            if self.config.wide or stable:
+                for begin in range(0, self.out_features, c):
+                    end = min(begin + c, self.out_features)
+                    correction = restore_scales(
+                        sums[:, :, None],
+                        xscale[:, :, None],
+                        self.zero_correction[None, :, begin:end],
+                    ).sum(1)
+                    output[:, begin:end] += correction
+            else:
+                correction = (sums.to(dtype) * xscale.to(dtype)) @ self.zero_correction.to(dtype)
+                output = output + correction
         if self.bias is not None:
             output = output + self.bias
         if not self.config.wide and not stable and not torch.isfinite(output).all():
@@ -380,7 +548,7 @@ class AnalogMatrix(nn.Module):
             return x.new_empty((*shape[:-1], self.out_features))
         if self._event >= 2**63:
             raise OverflowError("read-event counter exhausted")
-        q, xscale = input_tiles(x.reshape(-1, self.in_features), self.config)
+        q, xscale = input_tiles(x.reshape(-1, self.in_features), self.config, self.input_scale)
         event = self._event
         schedule = default_schedule(self.config)
         key = tuple(shape), str(x.dtype)

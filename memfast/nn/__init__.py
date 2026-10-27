@@ -1,8 +1,9 @@
 """Analog inference, hardware-aware training, and recurrent layers."""
 
 from .conversion import convert_model, reset_read_events
-from .layers import AnalogConv2d, AnalogLinear
-from .recurrent import AnalogRNN, AnalogRNNCell
+from .convolution import AnalogConv2d
+from .linear import AnalogLinear
+from .recurrent import AnalogGRU, AnalogGRUCell, AnalogRNN, AnalogRNNCell
 from .training import TrainableAnalogConv2d, TrainableAnalogLinear
 
 HATLinear = TrainableAnalogLinear
@@ -17,6 +18,8 @@ __all__ = [
     "HATConv2d",
     "AnalogRNNCell",
     "AnalogRNN",
+    "AnalogGRUCell",
+    "AnalogGRU",
     "convert_model",
     "reset_read_events",
 ]
