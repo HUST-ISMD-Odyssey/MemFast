@@ -4,16 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memfast"
-version = "0.1.0"
+version = "0.2.0"
 description = "Bit-sliced analog in-memory computing simulation with PyTorch"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [{name = "HUST ISMD Odyssey"}]
-dependencies = ["torch>=2.5"]
+dependencies = ["torch>=2.5", "torchvision>=0.20"]
 
 [project.optional-dependencies]
-examples = ["torchvision>=0.20"]
+models = ["timm>=1", "transformers>=4.45", "lm-eval[hf]>=0.4", "ultralytics>=8"]
 dev = ["pytest>=8", "build>=1", "ruff>=0.9"]
 
 [project.urls]

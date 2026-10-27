@@ -1,16 +1,17 @@
-"""Inference modules and conversion of PyTorch networks."""
+"""Inference layers using the simulator's programmed matrices."""
 
-import copy
 import math
 
 import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .simulator import AnalogMatrix
+from ..simulator import AnalogMatrix
 
 
 class AnalogLinear(AnalogMatrix):
+    """Map a PyTorch Linear, preserving its bias and matrix orientation."""
+
     def __init__(self, source, simulator, *, name="linear"):
         if not isinstance(source, nn.Linear):
             raise TypeError("source must be torch.nn.Linear")
@@ -70,51 +71,3 @@ class AnalogConv2d(nn.Module):
             )
         ]
         return output.reshape(x.shape[0], self.out_channels, height, width)
-
-
-def convert_model(model, simulator, *, exclude=(), inplace=False):
-    """Convert Linear and Conv2d; other operations retain their PyTorch behavior."""
-    if not isinstance(model, nn.Module):
-        raise TypeError("model must be a PyTorch module")
-    if isinstance(exclude, str):
-        raise TypeError("exclude must be a sequence of module paths")
-    excluded = set(exclude)
-    names = {name for name, _ in model.named_modules(remove_duplicate=False)}
-    missing = excluded - names
-    if missing:
-        raise ValueError(f"unknown excluded modules: {sorted(missing)}")
-    for name, module in model.named_modules():
-        if name in excluded or any(name.startswith(path + ".") for path in excluded):
-            continue
-        if isinstance(module, nn.Conv2d) and isinstance(module.padding, str):
-            raise ValueError(f"{name}: numeric Conv2d padding is required")
-    target = model if inplace else copy.deepcopy(model)
-    target.to(simulator.device).eval()
-    replacements = {}
-
-    def convert(module, name):
-        if name in excluded or isinstance(module, (AnalogMatrix, AnalogConv2d)):
-            return module
-        if id(module) in replacements:
-            return replacements[id(module)]
-        if isinstance(module, nn.Linear):
-            result = AnalogLinear(module, simulator, name=name or "linear")
-        elif isinstance(module, nn.Conv2d):
-            result = AnalogConv2d(module, simulator, name=name or "conv")
-        else:
-            result = module
-            for attr, child in list(module._modules.items()):
-                if child is not None:
-                    child_name = f"{name}.{attr}" if name else attr
-                    setattr(module, attr, convert(child, child_name))
-        replacements[id(module)] = result
-        return result
-
-    return convert(target, "").eval().requires_grad_(False)
-
-
-def reset_read_events(model, event=0):
-    """Replay a read event across all programmed matrices."""
-    for module in model.modules():
-        if isinstance(module, AnalogMatrix):
-            module.reset_read(event)

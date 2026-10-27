@@ -17,16 +17,16 @@ from .quantization import input_tiles, weight_tiles
 
 
 def default_schedule(config):
-    return dict(arrays=2, vectors=2, columns=4, workers=min(2, config.weight_bits))
+    return dict(arrays=2, vectors=2, columns=4, workers=min(2, len(config.weight_layout)))
 
 
 def schedule_grid(config, n, partitions):
     seen = set()
     for t, v, columns, workers in itertools.product(
-        (2, 4, 8, 16, 32, 64),
+        (1, 2, 4, 8, 16, 32, 64),
         (1, 2, 4, 8, 16, 32),
         (2, 4, 8),
-        range(1, config.weight_bits + 1),
+        range(1, len(config.weight_layout) + 1),
     ):
         if config.array_size[1] % columns:
             continue
@@ -40,10 +40,22 @@ def schedule_grid(config, n, partitions):
 def source_hash():
     root = Path(__file__).parent
     digest = hashlib.sha256()
-    for path in sorted([*root.glob("*.py"), *root.glob("*.cu")]):
-        digest.update(path.name.encode())
+    for path in sorted([*root.rglob("*.py"), *root.rglob("*.cu")]):
+        digest.update(path.relative_to(root).as_posix().encode())
         digest.update(path.read_bytes())
     return digest.hexdigest()
+
+
+def restore_scales(value, input_scale, weight_scale):
+    """Restore extremes without overflowing an otherwise finite product."""
+    vm, ve = torch.frexp(value.double())
+    xm, xe = torch.frexp(input_scale.double())
+    wm, we = torch.frexp(weight_scale.double())
+    mantissa = vm * xm * wm
+    exponent = ve + xe + we
+    first = exponent.clamp(-1022, 1023)
+    restored = torch.ldexp(torch.ldexp(mantissa, first), exponent - first)
+    return torch.where(mantissa == 0, 0.0, restored)
 
 
 class Simulator:
@@ -66,7 +78,7 @@ class Simulator:
         if not math.isfinite(workspace_mb) or workspace_mb <= 0:
             raise ValueError("workspace_mb must be positive and finite")
         self.mode = mode
-        self.device = torch.device(device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         if self.device.type not in ("cpu", "cuda"):
             raise ValueError("device must be cpu or cuda")
         if self.device.type == "cuda":
@@ -114,10 +126,10 @@ class Simulator:
             sources=self._fingerprint,
             workspace_bytes=self.workspace_bytes,
             grid=dict(
-                arrays=[2, 4, 8, 16, 32, 64],
+                arrays=[1, 2, 4, 8, 16, 32, 64],
                 vectors=[1, 2, 4, 8, 16, 32],
                 columns=[2, 4, 8],
-                workers=self.config.weight_bits,
+                workers=len(self.config.weight_layout),
             ),
         )
         payload = json.loads(json.dumps(payload))
@@ -129,13 +141,14 @@ class Simulator:
         c = self.config
         n, m, r = q.shape
         width = min(schedule["arrays"], matrix.p)
-        size = (
-            4 * m * width * c.weight_bits * r * c.array_size[1]
-            + 16 * n * m * width * c.array_size[1]
-        )
+        size = (8 if c.precise_currents else 4) * m * width * len(
+            c.weight_layout
+        ) * r * c.array_size[1] + (
+            32 if c.wide else 16
+        ) * n * m * c.reads_per_array * width * c.array_size[1]
         if size > self.workspace_bytes:
             raise ResourceError("workspace budget")
-        if schedule["vectors"] * c.activation_bits * schedule["columns"] > 128:
+        if schedule["vectors"] * len(c.input_layout) * schedule["columns"] > 128:
             raise ResourceError("accumulator policy (vectors * activation bits * columns <= 128)")
         with torch.cuda.device(self.device):
             resource = program(
@@ -148,9 +161,19 @@ class Simulator:
     def _select(self, matrix, x, q, xscale, event):
         from .cuda import ResourceError, atomic_write
 
+        started = time.perf_counter()
         key, payload = self._key(matrix, x)
-        baseline = default_schedule(self.config)
-        reference_output = matrix._execute(q, xscale, baseline, event)
+        population = list(schedule_grid(self.config, q.shape[0], matrix.p))
+        reference_output = None
+        for baseline in [default_schedule(self.config), *population]:
+            try:
+                self._admit(matrix, q, baseline)
+                reference_output = matrix._execute(q, xscale, baseline, event)
+                break
+            except (ResourceError, torch.cuda.OutOfMemoryError):
+                torch.cuda.empty_cache()
+        if reference_output is None:
+            raise RuntimeError("no feasible reference schedule in the declared grid")
         if not torch.isfinite(reference_output).all():
             raise FloatingPointError("nonfinite default output during tuning")
         path = self.cache_dir / f"{key}.json"
@@ -164,7 +187,6 @@ class Simulator:
             complete=False,
         )
         self.records.append(record)
-        started = time.perf_counter()
         cached = self._selections.get(key)
         if cached is None and path.is_file():
             try:
@@ -192,9 +214,9 @@ class Simulator:
                 )
                 self._selections[key] = cached
                 return cached
-            except ResourceError:
+            except (ResourceError, torch.cuda.OutOfMemoryError):
+                torch.cuda.empty_cache()
                 cached = None
-        population = list(schedule_grid(self.config, q.shape[0], matrix.p))
         for schedule in population:
             candidate = dict(schedule=schedule, status="rejected", timed_samples=0)
             record["candidates"].append(candidate)
@@ -259,27 +281,51 @@ class AnalogMatrix(nn.Module):
         self.simulator, self.config, self.name = simulator, simulator.config, name
         self.out_features, self.in_features = weight.shape
         self.p = math.ceil(self.out_features / self.config.array_size[1])
-        packed, scale = weight_tiles(weight.detach().float().to(simulator.device), self.config)
+        packed, scale = weight_tiles(weight.detach().to(simulator.device), self.config)
         self.register_buffer("packed", packed)
         self.register_buffer("weight_scale", scale)
         if bias is not None and (
-            bias.shape != (self.out_features,) or not torch.isfinite(bias).all()
+            not bias.is_floating_point()
+            or bias.shape != (self.out_features,)
+            or not torch.isfinite(bias).all()
         ):
             raise ValueError("bias must be finite and match out_features")
         self.register_buffer(
-            "bias", None if bias is None else bias.detach().float().to(simulator.device).clone()
+            "bias",
+            None
+            if bias is None
+            else bias.detach()
+            .to(device=simulator.device, dtype=torch.float64 if self.config.wide else torch.float32)
+            .clone(),
         )
         self._event = 0
         tag = int.from_bytes(hashlib.sha256(name.encode()).digest()[:4], "little")
         self.seed = self.config.seed ^ tag
         self._prepared = {}
 
+    def _apply(self, fn, recurse=True):
+        programmed = {name: buffer for name, buffer in self._buffers.items() if buffer is not None}
+        super()._apply(fn, recurse=recurse)
+        for name, original in programmed.items():
+            transformed = self._buffers[name]
+            if transformed.dtype != original.dtype:
+                self._buffers[name] = original.to(device=transformed.device)
+            if transformed.device != original.device:
+                self._prepared.clear()
+        return self
+
     def get_extra_state(self):
         return dict(config=asdict(self.config), name=self.name, seed=self.seed, event=self._event)
 
     def set_extra_state(self, state):
-        if state["config"] != asdict(self.config):
+        loaded_config = dict(state["config"])
+        for name in ("rows_per_read", "input_slice", "weight_slice", "bw_e"):
+            loaded_config.setdefault(name, None)
+        if loaded_config != asdict(self.config):
             raise ValueError("checkpoint physical configuration differs")
+        if type(state["seed"]) is not int or not 0 <= state["seed"] < 2**32:
+            raise ValueError("invalid checkpoint sampling seed")
+        self.reset_read(state["event"])
         self.name, self.seed, self._event = state["name"], state["seed"], state["event"]
         self._prepared.clear()
 
@@ -288,26 +334,36 @@ class AnalogMatrix(nn.Module):
             raise ValueError("event must be a nonnegative signed 64-bit integer")
         self._event = event
 
-    def _execute(self, q, xscale, schedule, event):
+    def _execute(self, q, xscale, schedule, event, stable=False):
         runner = reference.partial
         if q.is_cuda:
             from .cuda import partial
 
             runner = partial
         output = torch.empty(
-            (q.shape[0], self.p * self.config.array_size[1]), device=q.device, dtype=torch.float32
+            (q.shape[0], self.p * self.config.array_size[1]),
+            device=q.device,
+            dtype=torch.float64 if self.config.wide or stable else torch.float32,
         )
         width = min(schedule["arrays"], self.p)
         c = self.config.array_size[1]
+        packed = self.packed.contiguous()
         for begin in range(0, self.p, width):
             end = min(begin + width, self.p)
-            value = runner(q, self.packed, self.config, schedule, self.seed, event, begin, end)
-            value = value * xscale[:, :, None, None]
-            value = value * self.weight_scale[None, :, begin:end, :]
+            value = runner(q, packed, self.config, schedule, self.seed, event, begin, end)
+            if self.config.wide or stable:
+                value = restore_scales(
+                    value, xscale[:, :, None, None], self.weight_scale[None, :, begin:end, :]
+                )
+            else:
+                value = value * xscale[:, :, None, None]
+                value = value * self.weight_scale[None, :, begin:end, :]
             output[:, begin * c : end * c] = value.sum(1).flatten(1)
         output = output[:, : self.out_features].contiguous()
         if self.bias is not None:
             output = output + self.bias
+        if not self.config.wide and not stable and not torch.isfinite(output).all():
+            return self._execute(q, xscale, schedule, event, stable=True)
         return output
 
     @torch.no_grad()
@@ -316,12 +372,15 @@ class AnalogMatrix(nn.Module):
             raise ValueError("input must be floating with matching in_features")
         if x.device != self.packed.device or x.device != self.simulator.device:
             raise ValueError("input and simulator must use the same device")
-        if self.weight_scale.dtype != torch.float32:
-            raise RuntimeError("keep simulator buffers in FP32; convert the model before mapping")
+        scale_dtype = torch.float64 if self.config.wide else torch.float32
+        if self.weight_scale.dtype != scale_dtype:
+            raise RuntimeError("keep simulator scale buffers at their mapped dtype")
         shape = x.shape
         if x.numel() == 0:
             return x.new_empty((*shape[:-1], self.out_features))
-        q, xscale = input_tiles(x.reshape(-1, self.in_features).float(), self.config)
+        if self._event >= 2**63:
+            raise OverflowError("read-event counter exhausted")
+        q, xscale = input_tiles(x.reshape(-1, self.in_features), self.config)
         event = self._event
         schedule = default_schedule(self.config)
         key = tuple(shape), str(x.dtype)
@@ -331,5 +390,8 @@ class AnalogMatrix(nn.Module):
                     self._prepared[key] = self.simulator._select(self, x, q, xscale, event)
             schedule = self._prepared[key]
         output = self._execute(q, xscale, schedule, event)
+        output = output.reshape(*shape[:-1], self.out_features).to(x.dtype)
+        if not torch.isfinite(output).all():
+            raise FloatingPointError("nonfinite analog output")
         self._event += 1
-        return output.reshape(*shape[:-1], self.out_features).to(x.dtype)
+        return output

@@ -4,18 +4,23 @@ MemFast is a functional simulator for neural-network inference on bit-sliced
 analog in-memory computing arrays. It connects device and converter parameters
 to matrix outputs and network accuracy through a PyTorch interface.
 
-The simulation follows quantization, binary weight programming, bit-serial
+The simulation follows quantization, sliced weight programming, sliced
 array currents, per-slice ADC conversion, and signed digital reconstruction.
 Weights remain compact between reads; CUDA kernels restore and consume arrays
 in bounded groups.
 
 ## Capabilities
 
-- Signed 2-8 bit activations and weights with one-bit slices.
-- Configurable rectangular arrays, quantization groups, and ADC resolution.
+- Signed INT and block floating-point (BFP) quantization, including 10-, 16-,
+  and 20-bit configurations.
+- Independent input and weight slice layouts, including multibit cells and
+  input levels such as `(1,1,2,2,2)` for eight-bit data.
+- Independent physical array geometry, rows per ADC read, quantization groups,
+  and uniform or per-weight-slice ADC resolution.
 - Programming and read variation, voltage noise, current output noise,
   S-shaped ADC nonlinearity, stuck-at faults, and conductance drift.
-- Matrix operations and conversion of PyTorch `Linear` and `Conv2d` layers.
+- Matrix operations, neural-network layers, model conversion, and
+  hardware-aware training.
 - CPU execution and accelerated CUDA execution.
 - Fixed default execution or exhaustive schedule tuning with a persistent cache.
 
@@ -33,11 +38,8 @@ cd MemFast
 python -m pip install .
 ```
 
-For the CIFAR-10 example, install the vision extra:
-
-```bash
-python -m pip install ".[examples]"
-```
+PyTorch and torchvision are included in the standard dependencies. Task-specific
+integrations for additional model libraries are described with their examples.
 
 CUDA execution compiles the included kernels with NVIDIA NVRTC on first use.
 The CUDA-enabled PyTorch distribution or CUDA Toolkit must provide NVRTC.
@@ -49,8 +51,10 @@ import torch
 from memfast import Config, Nonidealities, Simulator
 
 config = Config(
-    array_size=(64, 64),
-    weight_quant_gran=(64, 1),
+    array_size=(128, 128),
+    rows_per_read=32,
+    weight_quant_gran=(32, 1),
+    input_quant_gran=(1, 32),
     nonidealities=Nonidealities(write_variation=0.02),
 )
 simulator = Simulator(config, device="cpu")
@@ -58,10 +62,18 @@ array = simulator.map(torch.randn(32, 128))
 output = array(torch.randn(4, 128))
 ```
 
-`array_size` defines physical parallelism. `weight_quant_gran` defines which
-weights share a quantization scale. The example uses a separate scale for each
-64-row group in each output column, while the array computes 64 columns in
-parallel.
+`array_size` defines the physical array. `rows_per_read` defines how many rows
+are summed before each ADC conversion. Quantization groups define scale
+sharing. Each ADC partial is reconstructed and multiplied by its own input and
+weight scales before digital accumulation.
+
+Set `bw_e=None` for INT or an exponent width such as `bw_e=8` for BFP.
+Slice layouts are ordered from the sign slice to the least significant slice;
+`input_slice=(1,1,2,2,2)` and `weight_slice=(1,1,2,2,2)` each represent eight bits.
+Use `adc_bits=7` for one resolution throughout, or
+`adc_bits=(6,7,7,8,8)` for the five weight slices in that same order.
+The [user guide](docs/user-guide.md) defines mapping, exponent ranges, and
+accumulator limits.
 
 ## Network Simulation
 
@@ -87,7 +99,7 @@ behavior. Select layers can remain digital with `exclude=("classifier",)`.
 simulator = Simulator(config, mode="tuned", device="cuda:0")
 ```
 
-Tuning checks outputs against default execution before timing each candidate
+Tuning checks outputs against an admitted reference schedule before timing each candidate
 once. Matching cached selections skip traversal on later runs and receive an
 untimed output check. Cache keys include geometry, quantization, nonidealities,
 input shape, software, GPU properties, and implementation identity.
@@ -97,9 +109,11 @@ input shape, software, GPU properties, and implementation identity.
 - [User guide](docs/user-guide.md): configuration, physical models, sampling,
   tuning, and reproducibility.
 - [Examples](examples/README.md): matrix operations, model conversion,
-  individual nonidealities, and pretrained VGG11-BN on CIFAR-10.
+  training, vision models, recurrent networks, and language-model evaluation.
 - [Parameter scans](examples/results/README.md): measured CIFAR-10 results and
   their configurations.
+- [Validation](docs/validation.md): numerical coverage, workflow checks, and
+  real-data evaluation scope.
 
 ## Development
 
@@ -109,6 +123,12 @@ python -m pytest -q
 ```
 
 CUDA tests run when a CUDA device is available.
+
+## Package Layout
+
+`memfast` contains the physical configuration and numerical engine.
+`memfast.nn` provides network layers, conversion, and training;
+`memfast.models` provides model construction. Task workflows live in `examples`.
 
 ## License
 

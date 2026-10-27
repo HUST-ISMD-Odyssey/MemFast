@@ -4,7 +4,7 @@ from .config import Config, Nonidealities
 from .nn import AnalogConv2d, AnalogLinear, convert_model, reset_read_events
 from .simulator import AnalogMatrix, Simulator
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     "Config",
     "Nonidealities",

@@ -151,7 +151,7 @@ def test_shared_module_conversion():
     "change",
     [
         {"weight_quant_gran": (32, 1)},
-        {"input_quant_gran": (2, 64)},
+        {"input_quant_gran": (2, 32)},
         {"array_size": (64, 7)},
         {"adc_bits": 0},
         {"activation_bits": 1},

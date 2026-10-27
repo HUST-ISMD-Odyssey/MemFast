@@ -1,35 +1,49 @@
-"""Program and read a matrix without downloading data."""
-
-import argparse
-import json
+"""Program matrices with configurable slices, INT/BFP, geometry, and scale groups."""
 
 import torch
 
-from memfast import Config, Nonidealities, Simulator
+if __package__:
+    from ._common import parser, positive, report, setup, simulator
+else:
+    from _common import parser, positive, report, setup, simulator
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--device", default="cpu")
-    parser.add_argument("--mode", choices=("default", "tuned"), default="default")
-    parser.add_argument("--cache-dir")
-    args = parser.parse_args()
-    torch.manual_seed(7)
-    config = Config(weight_quant_gran=(64, 1), nonidealities=Nonidealities(write_variation=0.02))
-    simulator = Simulator(config, mode=args.mode, device=args.device, cache_dir=args.cache_dir)
-    weight = torch.randn(80, 128, device=simulator.device)
-    x = torch.randn(8, 128, device=simulator.device)
-    array = simulator.map(weight, name="example")
-    result = array(x)
-    assert result.shape == (8, 80) and torch.isfinite(result).all()
-    array.reset_read()
-    assert torch.equal(result, array(x))
-    error = (result - x @ weight.T).norm() / (x @ weight.T).norm()
-    print(
-        json.dumps(
-            dict(shape=list(result.shape), relative_l2=float(error), execution=simulator.report()),
-            indent=2,
-        )
+    command = parser(__doc__)
+    command.add_argument("--vectors", type=positive, default=8)
+    command.add_argument("--in-features", type=positive, default=128)
+    command.add_argument("--out-features", type=positive, default=80)
+    args = command.parse_args()
+    setup(args)
+    if args.smoke:
+        args.vectors = min(args.vectors, 2)
+        args.in_features = min(args.in_features, 12)
+        args.out_features = min(args.out_features, 8)
+    for name, bits in (("input_slice", args.activation_bits), ("weight_slice", args.weight_bits)):
+        widths = getattr(args, name)
+        if widths is not None and (widths[0] != 1 or sum(widths) != bits):
+            command.error(f"--{name.replace('_', '-')} must start with 1 and sum to {bits}")
+    weight = torch.randn(args.out_features, args.in_features, device=args.device)
+    x = torch.randn(args.vectors, args.in_features, device=args.device)
+    engine = None if args.digital else simulator(args)
+    expected = x @ weight.T
+    if engine is None:
+        result = expected
+        replay_equal = None
+    else:
+        array = engine.map(weight, name="example")
+        result = array(x)
+        array.reset_read()
+        replay_equal = torch.equal(result, array(x))
+        if not replay_equal:
+            raise AssertionError("reset_read did not replay the matrix output")
+    if not torch.isfinite(result).all():
+        raise FloatingPointError("nonfinite matrix output")
+    error = (result - expected).norm() / expected.norm().clamp_min(1e-12)
+    report(
+        args,
+        dict(shape=list(result.shape), relative_l2=float(error), read_replay_equal=replay_equal),
+        engine,
     )
 
 

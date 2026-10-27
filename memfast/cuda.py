@@ -69,10 +69,14 @@ def source(config):
     drift = (1 + ni.drift_time / ni.drift_reference_time) ** (-ni.drift_coefficient)
     values = dict(
         R=config.array_size[0],
+        ROWS=config.read_rows,
+        GROUPS=config.reads_per_array,
         C=config.array_size[1],
-        A=config.activation_bits,
-        W=config.weight_bits,
-        MAXIMUM=config.adc_maximum,
+        A=len(config.input_layout),
+        W=len(config.weight_layout),
+        WIDE_CODES=int(max(config.activation_bits, config.weight_bits) > 8),
+        WIDE_OUTPUT=int(config.wide),
+        PRECISE_CURRENTS=int(config.precise_currents),
         READ_MODE=("shared", "slice_pair", "output").index(ni.read_mode),
         HIGH=config.high_conductance,
         LOW=config.low_conductance,
@@ -88,11 +92,35 @@ def source(config):
         SAF_HIGH=ni.stuck_at_high,
         DRIFT=drift,
     )
-    defines = "\n".join(
-        f"#define {key} {value if type(value) is int else f'{value:.17e}f'}"
-        for key, value in values.items()
+    defines = []
+    for key, value in values.items():
+        suffix = (
+            ""
+            if config.precise_currents and key in ("HIGH", "LOW", "VOLTAGE", "UNIT", "INV_UNIT")
+            else "f"
+        )
+        literal = str(value) if type(value) is int else f"{value:.17e}{suffix}"
+        defines.append(f"#define {key} {literal}")
+    defines = "\n".join(defines)
+    tables = [
+        f"__device__ __constant__ int ADC_MAXIMUM[{len(config.weight_layout)}]"
+        f" = {{{', '.join(map(str, config.adc_maxima))}}};"
+    ]
+    for prefix, layout in (("A", config.input_layout), ("W", config.weight_layout)):
+        for index, name in enumerate(("SHIFT", "MASK", "FACTOR")):
+            ctype = "long long" if name == "FACTOR" else "int"
+            initializer = ", ".join(str(entry[index]) for entry in layout)
+            tables.append(
+                f"__device__ __constant__ {ctype} {prefix}_{name}[{len(layout)}]"
+                f" = {{{initializer}}};"
+            )
+    return (
+        defines
+        + "\n"
+        + "\n".join(tables)
+        + "\n"
+        + Path(__file__).with_name("kernels.cu").read_text(encoding="utf-8")
     )
-    return defines + "\n" + Path(__file__).with_name("kernels.cu").read_text(encoding="utf-8")
 
 
 class Program:
@@ -207,7 +235,10 @@ class Program:
     def resources(self, config, vectors, columns, workers):
         threads = math.ceil(config.array_size[1] // columns * workers / 32) * 32
         shared = max(
-            vectors * config.activation_bits * config.array_size[0] * 4,
+            vectors
+            * len(config.input_layout)
+            * config.read_rows
+            * (8 if config.precise_currents else 4),
             vectors * workers * config.array_size[1] * 8,
         )
         function = self.functions["consume"]
@@ -291,7 +322,11 @@ def partial(q, packed, config, schedule, seed, event, begin, end):
     with torch.cuda.device(q.device):
         kernel = program(config, vectors, columns, q.device.index)
         resource = kernel.resources(config, vectors, columns, workers)
-        g = torch.empty((m, width, config.weight_bits, r, c), device=q.device, dtype=torch.float32)
+        g = torch.empty(
+            (m, width, len(config.weight_layout), r, c),
+            device=q.device,
+            dtype=torch.float64 if config.precise_currents else torch.float32,
+        )
         count = g.numel()
         kernel.launch(
             "restore",
@@ -309,8 +344,12 @@ def partial(q, packed, config, schedule, seed, event, begin, end):
                 ct.c_ulonglong(event),
             ],
         )
-        result = torch.empty((n, m, width, c), device=q.device, dtype=torch.float32)
-        blocks = math.ceil(n / vectors) * m * width
+        result = torch.empty(
+            (n, m * config.reads_per_array, width, c),
+            device=q.device,
+            dtype=torch.float64 if config.wide else torch.float32,
+        )
+        blocks = math.ceil(n / vectors) * m * config.reads_per_array * width
         if blocks > kernel.attribute(5):
             raise ResourceError("grid limit")
         kernel.launch(

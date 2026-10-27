@@ -27,11 +27,48 @@ descendants. Unknown paths raise an error.
 Convolution uses PyTorch unfolding and one matrix per convolution group;
 stride, dilation, numeric padding, and groups are preserved. Unfolding can be
 substantial for large feature maps. Other layer operations remain digital.
-Inputs and outputs may be FP32, FP16, or BF16; analog arithmetic and scale
-buffers use FP32. Convert model dtypes before mapping.
+Inputs and outputs retain their floating dtype. Cell currents normally use FP32.
+FP64 currents are selected for slice digits wider than eight bits, closely
+spaced conductance levels, subnormal physical constants, or current ranges
+that exceed FP32. This preserves ADC counts in those configurations.
+Scale restoration uses FP64 for BFP or precisions above eight bits, and FP32
+for the default eight-bit INT configuration. Model dtype conversions preserve the
+exact programmed codes, scales, and bias storage. Inputs and outputs still
+follow the network dtype. Select the simulator device before mapping; moving
+a mapped network to a different device requires remapping with that device.
 
 The modules implement inference. Program new weights by mapping or converting
 the updated digital weights again.
+
+### Layers, Models, And Training
+
+`memfast.nn` contains inference layers (`AnalogLinear`, `AnalogConv2d`),
+recurrent layers (`AnalogRNNCell`, `AnalogRNN`), trainable layers
+(`HATLinear`, `HATConv2d`), conversion, and read-event utilities.
+`memfast.models` supplies MLP and recurrent classifiers, CIFAR and ImageNet
+architecture factories, and local language-model and detector loaders.
+The numerical engine remains independent of these model libraries.
+
+```python
+from memfast.nn import HATLinear, convert_model
+
+layer = HATLinear(torch.nn.Linear(128, 32), sim)
+trainable = convert_model(model, sim, training=True, gradient_mode="quantized")
+optimizer = torch.optim.Adam(trainable.parameters(), lr=1e-3)
+```
+
+HAT keeps floating master parameters and reprograms the analog weights on each
+forward invocation. The forward values follow the same physical model as
+inference. Default surrogate gradients use dequantized grouped inputs and
+weights, with identity derivatives through their quantizers. Set
+`gradient_mode="digital"` to use unquantized layer derivatives instead.
+Neither option differentiates the noise, faults, or ADC response.
+Convolution gradients use unfolded patches directly. Optimizer parameters and
+registered buffers keep stable identities for distributed training.
+
+Converted recurrent networks preserve stacked and bidirectional RNN execution,
+hidden states, and the upstream tanh or ReLU nonlinearity. See the examples for
+training, distributed launch, architecture construction, and checkpoint loading.
 
 ## Quantization And Physical Parallelism
 
@@ -42,16 +79,19 @@ PyTorch weights `[O, K]` are transposed internally.
 | --- | --- | --- |
 | `activation_bits` | Signed activation precision | `8` |
 | `weight_bits` | Signed weight precision | `8` |
-| `array_size=(R,C)` | Rows reduced per ADC operation and parallel output columns | `(64,64)` |
+| `array_size=(R,C)` | Physical array rows and output columns | `(64,64)` |
+| `rows_per_read=P` | Maximum physical rows summed before each ADC | `None`, meaning `R` |
 | `weight_quant_gran=(QK,QO)` | Rectangular weight region sharing one scale | `(None,1)` |
-| `input_quant_gran=(1,QK)` | Input region sharing one scale in each vector | `(1,None)` |
-| `adc_bits` | Unsigned ADC resolution per slice pair and array | `6` |
+| `input_quant_gran=(QN,QK)` | Input region sharing one scale | `(1,None)` |
+| `adc_bits` | Uniform unsigned ADC bits, or one entry per weight slice | `6` |
+| `input_slice`, `weight_slice` | Slice widths, most significant first | `None`, meaning one-bit slices |
+| `bw_e` | Shared exponent width for BFP; `None` selects INT | `None` |
 
 `None` spans the entire corresponding matrix dimension. Defaults therefore
 give per-output-channel weight quantization and per-vector activation
 quantization.
 
-Quantization uses `scale = max(abs(group)) / (2**(bits-1)-1)` and nearest-even
+INT quantization uses `scale = max(abs(group)) / (2**(bits-1)-1)` and nearest-even
 rounding. Codes range from `-(2**(bits-1)-1)` to `2**(bits-1)-1`. All-zero groups
 produce zero codes. Negative codes are stored in two's complement; the most
 significant bit has negative significance.
@@ -68,35 +108,125 @@ Examples for `array_size=(64,64)`:
 | `(None,1)` | One scale per output channel across all reduction rows |
 | `(None,None)` | One scale for the entire matrix |
 
-An explicit reduction group must be a positive multiple of `R` so that a
-single array partial sum has one dequantization scale. The column group is
-independent of `C`; it can be smaller or larger. Input reduction groups follow
-the same row-partition alignment rule. Tail rows and columns are zero-padded
-and removed from the returned result. Padding remains part of the physical
-array, including its device nonidealities.
+Input groups use the flattened matrix `[N,K]`:
+
+| Input quantization group | Scale sharing |
+| --- | --- |
+| `(None,None)` | Whole input matrix for this invocation |
+| `(1,None)` | Each vector independently |
+| `(None,1)` | Each input feature across vectors |
+| `(4,64)` | Groups of four vectors and 64 reduction elements |
+
+Leading input dimensions are flattened before grouping. For convolution, these
+are unfolded patches; an unfolded feature is a channel/kernel position.
+Scales are computed from the current invocation.
+
+`P` may be any positive integer up to `R`. Reads follow contiguous physical row
+ranges, with a shorter final range when `P` does not divide `R`. Each read must
+have one input scale per vector and one weight scale per output column.
+An explicit reduction group therefore aligns with all read boundaries: it
+must be a multiple of `R`, or a multiple of `P` when `P` divides `R`.
+The input vector group and weight output-column group are independent of these
+reduction constraints. Merely being larger than `P` is insufficient.
+
+For `R=128,P=32`, weight groups `(32,1)` and input groups `(1,32)` are valid.
+Each physical array produces four ADC partials:
+
+```text
+y[n,o] = sum_g input_scale[n,g] * weight_scale[g,o] * reconstructed_partial[n,g,o]
+```
+
+Scale restoration precedes summation across reads. Larger aligned quantization
+groups share a scale across multiple reads. Per-input-feature quantization is
+supported with `P=1`. Incompatible groups raise an error instead of being
+silently enlarged.
+
+Tail matrix rows and columns are zero-padded. Physical padding inherits the
+last logical scale group and remains part of executed reads, including output
+noise. Returned outputs exclude padded columns. Row selection is contiguous;
+zero input elements remain in their physical positions.
 
 Array columns must be divisible by four. Activation and weight precisions can
-differ, and each can be 2-8 bits. This release uses binary cells and one-bit
-activation slices.
+differ; the configuration accepts 2-32 bits subject to a checked signed 64-bit
+reconstruction bound. Ten-, sixteen-, and twenty-bit paths are included in the
+tests. Wider configurations use packed 64-bit codes. The bound is
+`sum(abs(input_significances)) * sum_w(adc_maximum[w] * abs(weight_significance[w]))`;
+an overflowing combination is rejected before execution.
+
+### Dynamic Slicing And BFP
+
+Slice widths run from most significant to least significant. The first width
+is one for the two's-complement sign cell, as in the original interface.
+Each remaining slice holds 1-16 bits; the widths sum to the corresponding
+activation or weight precision. `(1,1,2,2,2)` represents eight bits with five
+physical slices. Input and weight layouts can differ. ADC conversion and noise
+events follow the physical slice pairs.
+
+```python
+config = Config(
+    activation_bits=16,
+    weight_bits=16,
+    input_slice=(1, 3, 4, 4, 4),
+    weight_slice=(1, 3, 4, 4, 4),
+    bw_e=8,
+    array_size=(128, 128),
+    rows_per_read=32,
+    input_quant_gran=(4, 64),
+    weight_quant_gran=(32, 1),
+    adc_bits=16,
+)
+```
+
+ADC resolutions may also differ between weight slices. For example:
+
+```python
+config = Config(
+    weight_slice=(1, 1, 2, 2, 2),
+    adc_bits=(6, 7, 8, 9, 10),
+)
+```
+
+Both sequences run from most significant to least significant. The sign slice
+uses six ADC bits, the next slice seven, and the remaining slices eight, nine,
+and ten. Every activation slice paired with a given weight slice uses that
+weight slice's ADC resolution. A scalar applies to all weight slices.
+Sequence length must equal the number of physical weight slices, including
+the sign slice. Each resolution is an integer in `1..16`. Per-slice settings
+also control S-shaped ADC saturation and are part of cache and checkpoint
+identity.
+
+`bw_e=None` selects INT. An exponent width selects BFP: for block maximum `m`,
+choose `e=floor(log2(m))`, constrained to
+`[1-(2**(bw_e-1)-1), 2**(bw_e-1)-1]`. The block step is `2**(e+2-bits)`;
+mantissas use nearest-even rounding and range
+`[-2**(bits-1),2**(bits-1)-1]`. All-zero blocks produce zero codes.
+`bw_e` is separate from the mantissa/sign bits represented by the slice widths.
+This shared-exponent format saturates at the configured exponent limits.
 
 ## Array Computation
 
-Each weight bit maps to `low_conductance` or `high_conductance`.
-An active input bit applies `read_voltage`; an inactive bit applies zero.
+Binary slices map to `low_conductance` or `high_conductance`.
+A weight slice with maximum digit `Mw` maps digit `d` to
+`low_conductance + (high_conductance-low_conductance)*d/Mw`.
+An input slice with maximum digit `Ma` applies `read_voltage*d/Ma`.
 The nominal defaults are `1e-7 S`, `1e-5 S`, and `0.2 V`.
 
-For every input slice, weight slice, row partition, vector, and output column:
+For every input slice, weight slice, physical subread, vector, and output column:
 
 ```text
 I = sum_r V[r] * (G[r] - low_conductance)
-z = I / ((high_conductance - low_conductance) * read_voltage)
-code = clamp(round(response(z)), 0, 2**adc_bits - 1)
+z = I * Ma * Mw / ((high_conductance - low_conductance) * read_voltage)
+code = clamp(round(response(z)), 0, 2**adc_bits[weight_slice] - 1)
 ```
 
-The ADC converts each array current before accumulation across row partitions.
+The ADC converts each subread current before accumulation across reads.
+Its count step is one ideal input-digit/weight-digit product. Multibit slices
+can require a larger ADC range; `adc_bits` remains explicit.
 Integer ADC codes are combined with signed bit significances; activation and
-weight scales then restore the numerical units. CUDA uses ascending-row FP32
-fused multiply-add and integer signed reconstruction. CPU uses the same model
+weight scales then restore the numerical units. Wide precision uses exponent
+decomposition when restoring scales, avoiding intermediate overflow for finite
+products. CUDA uses ascending-row fused multiply-add at the selected current
+precision and integer signed reconstruction. CPU uses the same model
 with PyTorch matrix operations; floating-point reduction differences can affect
 currents near an ADC boundary.
 
@@ -174,12 +304,13 @@ columns and weight slices. An inactive input bit remains at zero voltage.
 ADC conversion:
 
 ```text
-I_noisy = I + output_noise * R * current_unit * Z
+I_noisy = I + output_noise * read_rows * current_unit * Z
 current_unit = (high_conductance - low_conductance) * read_voltage
 ```
 
-It is sampled separately for every vector, array, output column, and slice
-pair. Its scale is relative to a fully active nominal binary row partition.
+It is sampled separately for every vector, subread, output column, and slice
+pair. Its scale is relative to a fully active nominal subread. A shorter
+physical final subread uses its actual physical row count.
 This parameter models output-referred noise directly; `read_mode="output"`
 instead derives the noise scale from the programmed conductances and inputs.
 The two terms can be combined.
@@ -190,7 +321,8 @@ The two terms can be combined.
 `response(z) = z / (1 + abs(alpha * z / adc_maximum))`
 before nearest-even ADC rounding and unsigned clipping. `alpha=0` gives a
 linear transfer. The parameter controls a behavioral response curve and
-requires calibration for a specific ADC.
+requires calibration for a specific ADC. With per-weight-slice ADC resolutions,
+`adc_maximum` is the maximum count of the current weight slice.
 
 ### Stuck-At Faults
 
@@ -225,19 +357,21 @@ to two workers. These scheduling choices do not change physical geometry.
 
 | Execution axis | Values |
 | --- | --- |
-| Restored output-array tiles | `2, 4, 8, 16, 32, 64` |
+| Restored output-array tiles | `1, 2, 4, 8, 16, 32, 64` |
 | Vectors per block tile | `1, 2, 4, 8, 16, 32` |
 | Columns per thread | `2, 4, 8` where they divide array columns |
-| Weight-slice workers | `1 .. weight_bits` |
+| Weight-slice workers | `1 .. number_of_weight_slices` |
 
 Activation and weight slice counts remain fixed by the configured precisions.
 Execution-equivalent restoration widths and vector tiles are deduplicated.
 Candidates exceeding the workspace budget, actual device resource limits,
 or the register policy are rejected. The register policy permits
-`vectors * activation_bits * columns <= 128` and excludes compiled spills.
+`vectors * number_of_input_slices * columns <= 128` and excludes compiled spills.
 The complete declared grid is visited, including rejected candidates.
 
-Compilation and an untimed output comparison precede one CUDA-event timing
+An admitted reference schedule is selected before traversal. Default execution
+is used when it fits the resource and workspace limits; otherwise the first
+feasible schedule supplies the reference. Compilation and an untimed comparison precede one CUDA-event timing
 sample for each admitted candidate. Selection is strict minimum measured
 latency. The same input and random event are used throughout. A compilation or
 output error stops tuning. The fastest measurement is specific to this run,
