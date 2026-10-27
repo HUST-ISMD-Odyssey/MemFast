@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memfast"
+version = "0.1.0"
+description = "Bit-sliced analog in-memory computing simulation with PyTorch"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "HUST ISMD Odyssey"}]
+dependencies = ["torch>=2.5"]
+
+[project.optional-dependencies]
+examples = ["torchvision>=0.20"]
+dev = ["pytest>=8", "build>=1", "ruff>=0.9"]
+
+[project.urls]
+Repository = "https://github.com/HUST-ISMD-Odyssey/MemFast"
+Issues = "https://github.com/HUST-ISMD-Odyssey/MemFast/issues"
+
+[tool.setuptools.packages.find]
+include = ["memfast*"]
+
+[tool.setuptools.package-data]
+memfast = ["*.cu"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
