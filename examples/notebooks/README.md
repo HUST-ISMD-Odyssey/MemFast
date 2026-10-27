@@ -25,8 +25,7 @@ Set these environment variables before launching Jupyter, or edit the visible
 settings cell. Use ImageNet's standard class-directory ordering.
 
 MobileNet evaluates the first 128 images by default. Set `max_samples=None`
-for the complete validation split. Subset scores establish a comparison on
-those images and must not be reported as complete ImageNet accuracy.
+for the complete validation split.
 The DFT notebook defaults to CPU and a fixed 64x64 photograph.
 
 The VGG notebooks use `MEMFAST_CIFAR10_ROOT`, `MEMFAST_VGG_CHECKPOINT` and
@@ -43,4 +42,4 @@ checkpoint is separate, in `examples/checkpoints/`.
 Ideal CIM retains quantization, slicing and ADC conversion. Write-noisy CIM
 adds a fixed programmed conductance realization. Rounding can make the
 ideal and noisy outputs coincide for a particular configuration; the
-notebooks report the observed values without assuming a noise penalty.
+notebooks show the corresponding accuracy and reconstruction results.

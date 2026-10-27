@@ -15,10 +15,7 @@ Activations remain signed; weight operands follow ``Config.weight_signed``.
 Unsigned HAT requires nonnegative master weights on every programming step.
 
 Conv2d quantizes unfolded patches and each group's physical [K,O] weights.
-Its gradients use those patches directly. The old Conv2d implementation first
-folded and averaged overlapping dequantized patches into an image; that can
-change weight gradients when patch scales differ, so the two convolution
-backwards are not claimed to be numerically identical.
+Its gradients use the dequantized patches directly, with their own group scales.
 """
 
 import torch

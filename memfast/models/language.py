@@ -30,8 +30,6 @@ def load_causal_lm(checkpoint, *, device="cpu", dtype=torch.float32):
     implemented by transformers; Linear layers can then be converted normally.
     Qwen3.5 uses its upstream hybrid decoder, with the multimodal wrapper when
     present in the checkpoint. Text-only callers do not supply image inputs.
-    Small digital/CIM architecture checks cover these paths on transformers
-    5.8.0; this does not certify every model size or checkpoint in each family.
     """
     root = Path(checkpoint).expanduser()
     if not root.is_dir():

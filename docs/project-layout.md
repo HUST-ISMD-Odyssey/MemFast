@@ -23,7 +23,7 @@ device and quantization behavior belongs in the simulator.
 | `examples/configs/` | Optional JSON configurations, one per tutorial |
 | `examples/checkpoints/` | Small released digital/static LeNet checkpoints and provenance |
 | `examples/notebooks/` | Consecutive learning workflows and intermediate results |
-| `docs/` | User manual and verification scope |
+| `docs/` | User manual, project layout and example results |
 
 Example names use `NN_model_dataset.py`; general matrix and language benchmark
 names describe the operation when there is no single fixed dataset.
@@ -71,13 +71,6 @@ the unpadded 3x3 stem and no max pooling. Architectures are built first and
 digital checkpoints load strictly before conversion. A similarly named
 ImageNet checkpoint is not interchangeable.
 
-There is no public results or test directory. Maintainer validation code and
-raw receipts are retained separately; `docs/validation.md` records the public
-verification scope and actual measurements. Example outputs default to user
-supplied paths or ignored `examples/output/`.
+Example outputs use user-supplied paths or `examples/output/`.
 
-The former dataset-only wrappers and underscore-prefixed helper scripts have
-been replaced by numbered examples and `common/`. Nonideality scans and the
-DDP HAT example have been removed. Nonideality experiments now live in a guided
-VGG notebook. Core nonidealities and distributed-compatible
-trainable layer behavior remain available.
+The VGG notebooks demonstrate nonideality sweeps and per-layer mixed precision.

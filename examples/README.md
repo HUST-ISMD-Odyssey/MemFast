@@ -132,7 +132,7 @@ and average pooling, followed by three Linear layers producing raw logits.
 It is adapted to 28x28 input. The default
 `examples/checkpoints/lenet5_mnist.pt` achieved **98.49% digital** and
 **98.50% default CIM** accuracy on all 10,000 MNIST test images. See
-[validation](../docs/validation.md) for the configuration.
+[example results](../docs/example-results.md) for the configuration.
 
 ```bash
 python examples/03_lenet5_mnist.py --device cuda:0 --download --data-root data
@@ -174,14 +174,14 @@ ImageNet models come from torchvision or timm. `--weights DEFAULT` explicitly
 requests upstream weights and preprocessing. `--checkpoint PATH` loads local
 weights instead. The data root is an ImageFolder evaluation split arranged as
 `val/class_name/image.JPEG`, with the checkpoint's class index ordering.
-`--limit 32` is a limited workflow check, not complete ImageNet accuracy.
+`--limit 32` evaluates the first 32 images.
 CIFAR weights are user supplied or produced by the training tutorial.
 
 ## Speech And Detection
 
 The GRU tutorial preserves the two-layer Speech Commands model and its feature
 preprocessing. Use the earlier matching checkpoint containing `state_dict`,
-class names and normalization statistics. It is not an unrelated vanilla RNN.
+class names and normalization statistics.
 
 ```bash
 python examples/12_gru_speech.py --device cuda:0 \
@@ -217,12 +217,12 @@ Language checkpoints contain config, weights and tokenizer. These loaders
 disable downloads and remote-code execution. The language head is digital
 by default. Evaluation supports a local text corpus or task suites through
 lm-evaluation-harness.
-See [validation](../docs/validation.md) for measured scope and conditions.
+See [example results](../docs/example-results.md) for accuracy and simulation settings.
 
 ## Small Execution Checks
 
 `--smoke` uses synthetic inputs or tiny random models and reports
-`synthetic: true`. It checks execution, not task accuracy.
+`synthetic: true`.
 
 ```bash
 python examples/01_matrix.py --smoke

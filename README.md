@@ -26,9 +26,6 @@ in bounded groups.
 - CPU execution and accelerated CUDA execution.
 - Fixed default execution or exhaustive schedule tuning with a persistent cache.
 
-MemFast models array computation and inference accuracy. Circuit timing, energy,
-area, and interconnect parasitics require separate models.
-
 ## Installation
 
 Install Python 3.10 or newer and a PyTorch build for your CPU or CUDA platform.
@@ -132,10 +129,8 @@ Use `Nonidealities(write_variation=0)` for ideal devices.
 simulator = Simulator(config, mode="tuned", device="cuda:0")
 ```
 
-Tuning checks outputs against an admitted reference schedule before timing each candidate
-once. Matching cached selections skip traversal on later runs and receive an
-untimed output check. Cache keys include geometry, quantization, nonidealities,
-input shape, software, GPU properties, and implementation identity.
+Tuned mode searches once for each new input shape and configuration.
+Matching cached selections are reused on later runs.
 
 ## Documentation And Examples
 
@@ -148,8 +143,8 @@ input shape, software, GPU properties, and implementation identity.
   training, vision models, recurrent networks, and language-model evaluation.
 - [Project layout](docs/project-layout.md): package responsibilities and
   example configuration.
-- [Validation](docs/validation.md): numerical coverage, workflow checks, and
-  real-data measurements and benchmark conditions.
+- [Example results](docs/example-results.md): accuracy and reconstruction results
+  with their datasets and simulation settings.
 
 ## Development
 
@@ -159,13 +154,10 @@ python -m ruff check memfast examples
 python -m build
 ```
 
-Maintainer numerical and integration checks are run separately. Small public
-execution checks are described with the examples.
-
 ## Package Layout
 
-Direct matrix multiplication is a primary interface; it does not require
-a neural network. The DFT notebook demonstrates a signal-processing workflow
+Direct matrix multiplication is a primary interface.
+The DFT notebook demonstrates a signal-processing workflow
 using the same array, quantization and device models.
 
 `memfast` contains the physical configuration and numerical engine.

@@ -19,7 +19,7 @@ its original dataset terms.
 The CIM result uses A8W8 INT, binary slices, 64x64 arrays, 64 rows per read,
 ADC6, per-vector input scales, per-output-channel weight scales, and
 write variation 0.02. All other nonidealities are disabled. The result is one
-fixed programming realization, not an average over seeds.
+fixed programming realization with seed 135.
 
 ```bash
 python examples/03_lenet5_mnist.py --stage train --device cuda:0 \
