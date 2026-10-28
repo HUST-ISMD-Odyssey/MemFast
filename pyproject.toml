@@ -13,7 +13,7 @@ authors = [{name = "HUST ISMD Odyssey"}]
 dependencies = ["torch>=2.5", "torchvision>=0.20"]
 
 [project.optional-dependencies]
-models = ["timm>=1", "transformers>=4.45", "lm-eval[hf]>=0.4", "ultralytics>=8", "datasets>=3", "torchaudio>=2.5"]
+models = ["timm>=1", "transformers>=4.45", "lm-eval[hf]>=0.4", "ultralytics>=8", "datasets>=3", "torchaudio>=2.5", "soundfile>=0.12"]
 dev = ["build>=1", "ruff>=0.9"]
 
 [project.urls]

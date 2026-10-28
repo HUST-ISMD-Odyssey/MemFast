@@ -1,78 +1,59 @@
 # Project Layout
 
-The public API offers matrix multiplication, PyTorch-style layers,
-and complete network conversion. Model and dataset choices belong in examples;
-device and quantization behavior belongs in the simulator.
+MemFast separates numerical simulation, PyTorch layers, custom architectures
+and runnable workflows.
 
 | Path | Responsibility |
 | --- | --- |
-| `memfast/config.py` | Validated physical geometry, scales, slices, ADCs and nonidealities |
-| `memfast/functional.py` | PyTorch-order `mm` and `matmul`, broadcasting and FP32 backward |
+| `memfast/config.py` | Validated geometry, scales, slices, ADCs and nonidealities |
+| `memfast/functional.py` | PyTorch-order matrix multiplication and backward |
 | `memfast/quantization.py` | INT/BFP codes and scale groups |
-| `memfast/simulator.py` | Matrix programming, forward, schedule selection and persistent cache |
-| `memfast/reference.py` | Readable PyTorch implementation of array currents and ADCs |
-| `memfast/cuda.py`, `kernels.cu` | CUDA loading, compilation and accelerated kernels |
-| `memfast/random.py` | Reproducible physical random coordinates |
-| `memfast/nn/linear.py` | Inference Linear |
-| `memfast/nn/modules.py` | PyTorch-style trainable Linear and Conv2d constructors |
-| `memfast/nn/convolution.py` | Grouped and depthwise Conv2d |
-| `memfast/nn/recurrent.py` | Stateful RNN and GRU layers |
-| `memfast/nn/training.py` | Trainable master weights, analog forward and FP32 HAT surrogate |
-| `memfast/nn/conversion.py` | Full or selected model conversion and read-event reset |
-| `memfast/models/` | Reusable ordinary PyTorch architectures and upstream loaders |
-| `examples/01_...15_*.py` | Complete numbered task tutorials |
-| `examples/common/` | Data preparation, checkpoint I/O, metrics and configuration |
-| `examples/configs/` | Optional JSON configurations, one per tutorial |
-| `examples/checkpoints/` | Small released digital/static LeNet checkpoints and provenance |
-| `examples/notebooks/` | Consecutive learning workflows and intermediate results |
-| `docs/` | User manual and project layout |
+| `memfast/simulator.py` | Programming, forward, schedule search and cache |
+| `memfast/reference.py` | Readable PyTorch currents and ADCs |
+| `memfast/cuda.py`, `kernels.cu` | CUDA compilation and accelerated kernels |
+| `memfast/random.py` | Reproducible physical sampling coordinates |
+| `memfast/nn/linear.py` | Compact inference Linear |
+| `memfast/nn/convolution.py` | Grouped/depthwise inference Conv2d |
+| `memfast/nn/modules.py` | PyTorch-style trainable layer constructors |
+| `memfast/nn/recurrent.py` | RNN and GRU layers |
+| `memfast/nn/training.py` | HAT master weights and FP32 surrogate backward |
+| `memfast/nn/conversion.py` | Full/partial conversion and read-event reset |
+| `memfast/models/lenet.py`, `mlp.py`, `recurrent.py` | Custom baseline architectures |
+| `memfast/models/vgg_cifar.py`, `resnet_cifar.py` | Custom CIFAR architectures |
+| `memfast/models/speech.py` | Speech Commands GRU and checkpoint audio frontend |
+| `examples/01_...15_*.py` | Complete numbered workflows |
+| `examples/common/training.py` | `train(..., epochs=...)` and `evaluate(...)` |
+| `examples/common/checkpoints.py` | Strict state loading and FP32 checkpoint saving |
+| `examples/checkpoints/` | Two released LeNet tutorial assets |
+| `examples/notebooks/` | Stepwise tutorials with executed outputs |
+| `docs/` | User manual and layout |
 
-Example names use `NN_model_dataset.py`; general matrix and language benchmark
-names describe the operation when there is no single fixed dataset.
-VGG inference is followed by a separate HAT example that loads a checkpoint
-and trains with analog forward values. MLP and LeNet use `--stage` for
-their training, inference and HAT workflows.
-Task libraries remain optional; torch and torchvision are standard dependencies.
+Names follow `NN_model_dataset.py`; matrix and language examples name the
+operation or benchmark. Custom architectures live in `memfast/models`.
+torchvision, timm, Hugging Face and Ultralytics models load directly in
+examples and use their upstream implementations.
 
-## Configuration
+## Example Structure
 
-Each tutorial creates its model and converts it explicitly in `main`.
-The common utilities do not choose conversion boundaries.
+Each example starts with editable paths and settings, including a visible
+`Config`. Its `main` constructs the dataset and DataLoader, builds or loads
+the model, restores weights, converts selected layers and runs the task.
+`common` does not choose models, data, simulator settings or conversion scope.
 
-| JSON group | Contents | Examples |
-| --- | --- | --- |
-| `model` | Architecture, dimensions, pretrained weights or checkpoint | `hidden_sizes`, `checkpoint`, `model`, `weights` |
-| `conversion` | Layers to map or retain digitally | `include`, `exclude` |
-| `simulator` | `Config` fields; nested `nonidealities` | `array_size`, `bw_e`, `rows_per_read`, `adc_bits` |
-| `run` | Device, stage, optimizer, data and execution | `device`, `stage`, `epochs`, `learning_rate`, `mode` |
+MLP, LeNet and Speech Commands GRU accept `--stage train|inference|hat`.
+VGG HAT follows its inference example. The static LeNet example accepts
+`--stage calibrate|inference`. Other examples run their inference task directly.
+User outputs go to `examples/output/` by default; released checkpoints are
+kept separate. Dataset paths and preprocessing are visible in each example.
 
-The JSON is optional. Defaults are declared next to the example's arguments;
-command-line arguments override JSON values. Relative paths are interpreted
-from the working directory, except the bundled LeNet checkpoint, which is
-resolved relative to the examples directory. Common simulator flags have command-line
-forms; all physical parameters are available in the `simulator` object.
-Run one example with `--help` to see its task-specific fields.
-
-```bash
-python examples/03_lenet5_mnist.py \
-  --config examples/configs/03_lenet5_mnist.json \
-  --data-root data --exclude classifier.4
-```
-
-## Migration
+## Layer Migration
 
 The old MemIntelli `NN_layers/linear.py` and `NN_layers/convolution.py`
-were replaced by MemFast's layer adapters. Before this reorganization both
-adapters lived in `memfast/nn/layers.py`; their public exports remain
-`AnalogLinear` and `AnalogConv2d`. They retain bias, convolution groups,
-stride, dilation, numeric padding and padding-mode behavior.
-Conv1d, Conv3d and string padding are outside the current conversion API.
+are represented by MemFast's `nn/linear.py`, `nn/convolution.py` and trainable
+constructors in `nn/modules.py`. Public `AnalogLinear` and `AnalogConv2d`
+exports remain available through `nn/layers.py`.
 
-CIFAR VGG retains the legacy three-layer classifier. CIFAR ResNet retains
-the unpadded 3x3 stem and no max pooling. Architectures are built first and
-digital checkpoints load strictly before conversion. A similarly named
-ImageNet checkpoint is not interchangeable.
-
-Example outputs use user-supplied paths or `examples/output/`.
-
-The VGG notebooks demonstrate nonideality sweeps and per-layer mixed precision.
+Layers retain bias, groups, stride, dilation, numeric padding and padding
+modes. HAT supports analog forward with FP32 surrogate backward. The custom
+CIFAR ResNet18 retains its unpadded 3x3 stride-one stem and no maxpool.
+Build the matching architecture and restore its weights before conversion.

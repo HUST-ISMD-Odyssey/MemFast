@@ -17,7 +17,7 @@ in bounded groups.
   input levels such as `(1,1,2,2,2)` for eight-bit data.
 - Independent physical array geometry, rows per ADC read, quantization groups,
   and uniform or per-weight-slice ADC resolution.
-- Programming and read variation, voltage noise, current output noise,
+- Programming and read variation, voltage noise,
   S-shaped ADC nonlinearity, stuck-at faults, and conductance drift.
 - Matrix operations, neural-network layers, model conversion, and
   hardware-aware training.
@@ -174,7 +174,9 @@ using the same array, quantization and device models.
 
 `memfast` contains the physical configuration and numerical engine.
 `memfast.nn` provides network layers, conversion, and training;
-`memfast.models` provides model construction. Task workflows live in `examples`.
+`memfast.models` contains the custom tutorial architectures. Task workflows
+and direct upstream model loading live in `examples`, with editable settings,
+data loading and CIM conversion visible in each file.
 
 ## License
 

@@ -100,9 +100,10 @@ a mapped network to a different device requires remapping with that device.
 compact inference adapters (`AnalogLinear`, `AnalogConv2d`),
 recurrent RNN/GRU layers, trainable layers
 (`HATLinear`, `HATConv2d`), conversion, and read-event utilities.
-`memfast.models` supplies MLP and recurrent classifiers, CIFAR and ImageNet
-architecture factories, and local language-model and detector loaders.
-The numerical engine remains independent of these model libraries.
+`memfast.models` supplies custom MLP, LeNet, CIFAR and Speech Commands
+architectures. Examples load torchvision, timm, Hugging Face and Ultralytics
+models directly, then convert their supported layers. The numerical engine
+remains independent of these model libraries.
 
 ```python
 from memfast.nn import Linear, convert_model
@@ -421,23 +422,6 @@ interchangeable.
 `V_actual = V_nominal * (1 + voltage_variation * Z)`. Samples are independent
 per vector, row partition, input slice, and row, and shared across output
 columns and weight slices. An inactive input bit remains at zero voltage.
-
-### Current Output Noise
-
-`output_noise` adds independent Gaussian noise directly to each current before
-ADC conversion:
-
-```text
-I_noisy = I + output_noise * read_rows * current_unit * Z
-current_unit = (high_conductance - low_conductance) * read_voltage
-```
-
-It is sampled separately for every vector, subread, output column, and slice
-pair. Its scale is relative to a fully active nominal subread. A shorter
-physical final subread uses its actual physical row count.
-This parameter models output-referred noise directly; `read_mode="output"`
-instead derives the noise scale from the programmed conductances and inputs.
-The two terms can be combined.
 
 ### S-Shaped ADC Nonlinearity
 

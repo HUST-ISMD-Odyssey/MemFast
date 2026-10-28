@@ -3,33 +3,36 @@
 import tempfile
 from pathlib import Path
 
-import numpy as np
 import torch
+from ultralytics import YOLO
 
-from memfast import convert_model
-from memfast.models import load_detector
+from memfast import Config, Nonidealities, Simulator, convert_model
 
-if __package__:
-    from .common import (
-        load_checkpoint,
-        parser,
-        positive,
-        report,
-        setup,
-        simulator,
-    )
-else:
-    from common import (
-        load_checkpoint,
-        parser,
-        positive,
-        report,
-        setup,
-        simulator,
-    )
+DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+CHECKPOINT = Path("models/yolo_voc.pt")  # A detector trained for VOC's 20 classes.
+DATA_YAML = Path("data/voc.yaml")
+RUN_DIR = Path(__file__).resolve().parent / "output/yolo"
+SPLIT = "test"
+IMAGE_SIZE = 640
+BATCH_SIZE = 1
+INCLUDE = None
+EXCLUDE = ()
+CONFIG = Config(
+    activation_bits=8,
+    weight_bits=8,
+    input_slice=(1,) * 8,
+    weight_slice=(1,) * 8,
+    array_size=(64, 64),
+    rows_per_read=64,
+    input_quant_gran=(1, None),
+    weight_quant_gran=(None, 1),
+    adc_bits=6,
+    bw_e=None,
+    nonidealities=Nonidealities(write_variation=0.02),
+)
 
 
-def voc_yaml(source, destination, *, split, limit):
+def voc_yaml(source, destination, *, split):
     """Resolve local upstream data and select a deterministic image list."""
     import yaml
     from ultralytics.data.utils import IMG_FORMATS, check_det_dataset
@@ -61,7 +64,6 @@ def voc_yaml(source, destination, *, split, limit):
         else:
             raise ValueError("VOC splits must be image directories or image-list files")
     images = sorted(set(images))
-    images = images[:limit] if limit else images
     if not images or any(not image.is_file() for image in images):
         raise ValueError("VOC split is empty or contains missing images")
     image_list = destination / f"{split}_images.txt"
@@ -87,110 +89,49 @@ def voc_yaml(source, destination, *, split, limit):
 
 
 def main():
-    command = parser(__doc__)
-    command.add_argument("--architecture", default="yolo11n.yaml")
-    command.add_argument(
-        "--state-checkpoint", type=Path, help="saved fused-model FP32 master state"
-    )
-    command.add_argument("--data-yaml", type=Path)
-    command.add_argument("--split", choices=("val", "test"), default="test")
-    command.add_argument("--image-size", type=positive, default=640)
-    command.add_argument("--confidence", type=float, default=0.001)
-    command.add_argument("--nms-iou", type=float, default=0.7)
-    command.add_argument("--run-dir", type=Path, default=Path("examples/output/yolo"))
-    command.set_defaults(batch_size=1)
-    args = command.parse_args()
-    setup(args)
-    if args.stage != "inference":
-        command.error("YOLO example supports inference only")
-    if args.image_size % 32 or not 0 <= args.confidence <= 1 or not 0 <= args.nms_iou <= 1:
-        command.error("image-size must be divisible by 32; confidence and nms-iou must be in [0,1]")
-    if not args.smoke and (args.checkpoint is None or args.data_yaml is None):
-        command.error("VOC requires a local --checkpoint and --data-yaml")
-    if args.smoke:
-        args.image_size = 64
-    detector = load_detector(args.checkpoint, architecture=args.architecture)
+    torch.manual_seed(135)
+    detector = YOLO(str(CHECKPOINT), task="detect")
     model = detector.model.float().eval()
     # Fuse in FP32 before conversion, matching the upstream inference graph.
     model.fuse()
-    load_checkpoint(model, args.state_checkpoint)
-    model.to(args.device)
-    engine = None
-    if not args.digital:
-        engine = simulator(args)
-        model = convert_model(
-            model,
-            engine,
-            include=args.include,
-            exclude=args.exclude,
-            training=args.stage == "hat",
-            inplace=True,
-        )
+    model.to(DEVICE)
+    simulator = Simulator(CONFIG, device=DEVICE)
+    model = convert_model(model, simulator, include=INCLUDE, exclude=EXCLUDE, inplace=True)
     detector.model = model
     with tempfile.TemporaryDirectory(prefix="memfast-voc-") as directory:
         directory = Path(directory)
         model.eval()
-        if args.smoke:
-            image = np.random.default_rng(args.seed).integers(0, 256, (64, 64, 3), dtype=np.uint8)
-            predictions = detector.predict(
-                source=image,
-                imgsz=64,
-                device=args.device,
-                half=False,
-                conf=args.confidence,
-                iou=args.nms_iou,
-                save=False,
-                verbose=False,
-            )
-            if any(not torch.isfinite(item.boxes.data).all() for item in predictions):
-                raise FloatingPointError("nonfinite detector predictions")
-            result = dict(
-                images=len(predictions), detections=[len(item.boxes) for item in predictions]
-            )
-        else:
-            definition, count, names = voc_yaml(
-                args.data_yaml, directory, split=args.split, limit=args.limit
-            )
-            expected = list(names.values()) if isinstance(names, dict) else list(names)
-            actual = detector.names
-            actual = list(actual.values()) if isinstance(actual, dict) else list(actual)
-            if actual != expected:
-                raise ValueError("checkpoint classes and order must match the VOC dataset")
-            metrics = detector.val(
-                data=str(definition),
-                split=args.split,
-                imgsz=args.image_size,
-                batch=args.batch_size,
-                workers=args.workers,
-                device=args.device,
-                half=False,
-                conf=args.confidence,
-                iou=args.nms_iou,
-                plots=False,
-                save_json=False,
-                project=str(args.run_dir),
-                name="validation",
-                exist_ok=True,
-                verbose=False,
-            )
-            result = dict(
-                images=count,
-                metric="Ultralytics AP50 and AP50:95",
-                map50=float(metrics.box.map50),
-                map50_95=float(metrics.box.map),
-                per_class_map50_95=metrics.box.maps.tolist(),
-            )
-    report(
-        args,
-        dict(
-            task="voc_detection",
-            model="yolo",
-            stage=args.stage,
-            fused_model=True,
-            evaluation=result,
-        ),
-        engine,
-    )
+        definition, count, names = voc_yaml(DATA_YAML, directory, split=SPLIT)
+        expected = list(names.values()) if isinstance(names, dict) else list(names)
+        actual = detector.names
+        actual = list(actual.values()) if isinstance(actual, dict) else list(actual)
+        if actual != expected:
+            raise ValueError("checkpoint classes and order must match the VOC dataset")
+        metrics = detector.val(
+            data=str(definition),
+            split=SPLIT,
+            imgsz=IMAGE_SIZE,
+            batch=BATCH_SIZE,
+            workers=0,
+            device=DEVICE,
+            half=False,
+            conf=0.001,
+            iou=0.7,
+            plots=False,
+            save_json=False,
+            project=str(RUN_DIR),
+            name="validation",
+            exist_ok=True,
+            verbose=False,
+        )
+        result = dict(
+            images=count,
+            map50=float(metrics.box.map50),
+            map50_95=float(metrics.box.map),
+            per_class_map50_95=metrics.box.maps.tolist(),
+        )
+    print(result)
+    return result
 
 
 if __name__ == "__main__":

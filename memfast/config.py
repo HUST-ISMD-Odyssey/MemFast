@@ -26,7 +26,6 @@ class Nonidealities:
     read_variation: float = 0.0
     read_mode: str = "shared"
     voltage_variation: float = 0.0
-    output_noise: float = 0.0
     adc_nonlinearity: float = 0.0
     stuck_at_low: float = 0.0
     stuck_at_high: float = 0.0

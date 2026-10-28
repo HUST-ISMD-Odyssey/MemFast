@@ -91,7 +91,6 @@ def source(config):
         WRITE=ni.write_variation,
         READ=ni.read_variation,
         VNOISE=ni.voltage_variation,
-        ONOISE=ni.output_noise,
         NONLINEAR=ni.adc_nonlinearity,
         SAF_LOW=ni.stuck_at_low,
         SAF_HIGH=ni.stuck_at_high,

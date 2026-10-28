@@ -155,8 +155,6 @@ __global__ void consume(
                         if constexpr (READ_MODE == 2 && READ != 0.f)
                             current += means[index] + sqrt(variances[index])
                                        * normal(address, read_seed, 60);
-                        if constexpr (ONOISE != 0.f)
-                            current += ONOISE * UNIT * read_rows * normal(address, read_seed, 50);
                         physical_t z = current * INV_UNIT;
                         if (A_MASK[a] != 1 || W_MASK[w] != 1)
                             z *= physical_t(A_MASK[a]) * physical_t(W_MASK[w]);

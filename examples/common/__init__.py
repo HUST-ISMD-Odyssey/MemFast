@@ -1,31 +1,6 @@
-"""Utilities shared by the numbered examples."""
+"""Small training, evaluation and checkpoint helpers for the examples."""
 
-from .runtime import (
-    classification_epoch,
-    load_checkpoint,
-    loader,
-    optimizer_for,
-    parser,
-    positive,
-    report,
-    save_checkpoint,
-    setup,
-    simulator,
-    synthetic,
-    training_options,
-)
+from .checkpoints import load_checkpoint, save_checkpoint
+from .training import evaluate, train
 
-__all__ = [
-    "classification_epoch",
-    "load_checkpoint",
-    "loader",
-    "optimizer_for",
-    "parser",
-    "positive",
-    "report",
-    "save_checkpoint",
-    "setup",
-    "simulator",
-    "synthetic",
-    "training_options",
-]
+__all__ = ["evaluate", "load_checkpoint", "save_checkpoint", "train"]

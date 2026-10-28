@@ -1,5 +1,6 @@
 """Calibrate LeNet on MNIST training images, save static INT4 weights, and infer."""
 
+import argparse
 import hashlib
 import json
 import time
@@ -7,58 +8,53 @@ from dataclasses import asdict
 from pathlib import Path
 
 import torch
-from torch.utils.data import Subset
+from torch.utils.data import DataLoader, Subset
+from torchvision import datasets, transforms
 
-from memfast import convert_model
+from memfast import Config, Nonidealities, Simulator, convert_model
 from memfast.models import LeNet5
 from memfast.nn import reset_read_events
 from memfast.simulator import AnalogMatrix
 
 if __package__:
-    from .common import (
-        classification_epoch,
-        load_checkpoint,
-        loader,
-        parser,
-        positive,
-        report,
-        setup,
-        simulator,
-    )
-    from .common.mnist import mnist_dataset
+    from .common import evaluate, load_checkpoint
 else:
-    from common import (
-        classification_epoch,
-        load_checkpoint,
-        loader,
-        parser,
-        positive,
-        report,
-        setup,
-        simulator,
-    )
-    from common.mnist import mnist_dataset
+    from common import evaluate, load_checkpoint
 
 
 EXAMPLES = Path(__file__).resolve().parent
 DEFAULT_SOURCE = EXAMPLES / "checkpoints/lenet5_mnist.pt"
 DEFAULT_STATIC = EXAMPLES / "checkpoints/lenet5_mnist_static_int4.pt"
 FORMAT = "memfast.lenet5.static-int4.v1"
+DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+DATA_ROOT = Path("data/mnist")
+CHECKPOINT = DEFAULT_SOURCE
+STATIC_CHECKPOINT = DEFAULT_STATIC
+CALIBRATED_CHECKPOINT = EXAMPLES / "output/lenet5_mnist_static_int4.pt"
+BATCH_SIZE = 128
+CALIBRATION_SAMPLES = 1024
+CALIBRATION_SEED = 135
+INCLUDE = None
+EXCLUDE = ()
+CONFIG = Config(
+    activation_bits=8,
+    weight_bits=4,
+    input_slice=None,
+    weight_slice=None,  # Binary slices, matching the shipped checkpoint.
+    array_size=(64, 64),
+    rows_per_read=None,  # All 64 rows per read.
+    input_quant_gran=(1, None),
+    weight_quant_gran=(None, 1),
+    adc_bits=6,
+    bw_e=None,
+    nonidealities=Nonidealities(write_variation=0.02),
+)
 
 
 def matrix_layers(model):
     return {
         name: module for name, module in model.named_modules() if isinstance(module, AnalogMatrix)
     }
-
-
-def calibration_data(args):
-    """Select only training indices; evaluation limits do not choose calibration data."""
-    dataset = mnist_dataset(args, training=True)
-    count = min(args.calibration_samples, len(dataset))
-    generator = torch.Generator().manual_seed(args.calibration_seed)
-    indices = torch.randperm(len(dataset), generator=generator)[:count].tolist()
-    return Subset(dataset, indices), indices
 
 
 @torch.inference_mode()
@@ -129,7 +125,7 @@ def indices_sha256(indices):
     return hashlib.sha256(json.dumps(indices, separators=(",", ":")).encode("ascii")).hexdigest()
 
 
-def static_payload(model, engine, calibration, args, indices):
+def static_payload(model, engine, calibration, indices):
     """The state contains packed integer weights and scales, without FP32 weight copies."""
     state = {
         name: value.detach().cpu().clone() if torch.is_tensor(value) else value
@@ -140,32 +136,35 @@ def static_payload(model, engine, calibration, args, indices):
         architecture="lenet5_mnist",
         state_dict=state,
         config=asdict(engine.config),
-        conversion=dict(include=args.include, exclude=args.exclude),
+        conversion=dict(include=INCLUDE, exclude=list(EXCLUDE)),
         normalization=dict(mean=[0.5], std=[0.5]),
         calibration=dict(
             calibration,
             split="train",
-            seed=args.calibration_seed,
+            seed=CALIBRATION_SEED,
             indices=indices,
             indices_sha256=indices_sha256(indices),
         ),
         source=dict(
-            checkpoint=str(args.checkpoint) if args.checkpoint else None,
-            sha256=file_sha256(args.checkpoint) if args.checkpoint else None,
+            checkpoint=str(CHECKPOINT),
+            sha256=file_sha256(CHECKPOINT),
         ),
-        synthetic=bool(args.smoke),
+        synthetic=False,
     )
 
 
-def restore_static(model, payload, engine, args):
+def restore_static(model, payload, engine):
     if payload.get("format") != FORMAT or payload.get("architecture") != "lenet5_mnist":
         raise ValueError("expected a LeNet static INT4 checkpoint produced by this example")
-    if payload["config"] != asdict(engine.config):
+    saved_config = dict(payload["config"])
+    effects = dict(saved_config["nonidealities"])
+    if effects.pop("output_noise", 0) != 0:
+        raise ValueError("checkpoint uses a removed noise model")
+    saved_config["nonidealities"] = effects
+    if saved_config != asdict(engine.config):
         raise ValueError("simulator configuration must match the saved static checkpoint")
-    if payload["conversion"] != dict(include=args.include, exclude=args.exclude):
+    if payload["conversion"] != dict(include=INCLUDE, exclude=list(EXCLUDE)):
         raise ValueError("include/exclude must match the saved static checkpoint")
-    if bool(payload["synthetic"]) != bool(args.smoke):
-        raise ValueError("a synthetic checkpoint is usable only with --smoke")
     matrices = matrix_layers(model)
     if set(matrices) != set(payload["calibration"]["layers"]):
         raise ValueError("checkpoint calibration layers differ from the converted model")
@@ -186,98 +185,47 @@ def restore_static(model, payload, engine, args):
     return {name: value for name, value in payload["calibration"].items() if name != "indices"}
 
 
-def main():
-    command = parser(__doc__)
-    command.set_defaults(
-        batch_size=128,
-        activation_bits=8,
-        weight_bits=4,
-        write_variation=0.02,
+def main(stage="inference"):
+    torch.manual_seed(135)
+    transform = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Normalize((0.5,), (0.5,)),
+        ]
     )
-    command.add_argument("--calibrate", action="store_true", help="observe training data and save")
-    command.add_argument("--static-checkpoint", type=Path, help="packed weights and fixed scales")
-    command.add_argument("--calibration-samples", type=positive, default=1024)
-    command.add_argument("--calibration-seed", type=int, default=135)
-    args = command.parse_args()
-    setup(args)
-    if args.stage != "inference" or args.digital:
-        command.error("this example performs static analog inference")
-    if args.calibration_seed < 0:
-        command.error("calibration-seed must be nonnegative")
-    explicit_static = "static_checkpoint" in args.explicit_options
-    if args.smoke and args.calibrate and not explicit_static:
-        command.error("--calibrate --smoke requires an explicit --static-checkpoint")
-    if args.smoke and not args.calibrate and not explicit_static:
-        args.static_checkpoint = None
-    calibrating = args.calibrate or (args.smoke and args.static_checkpoint is None)
-    if args.checkpoint is None and calibrating and not args.smoke:
-        args.checkpoint = DEFAULT_SOURCE
-    if args.static_checkpoint is None and not args.smoke:
-        args.static_checkpoint = DEFAULT_STATIC
-    if calibrating and args.static_checkpoint and args.checkpoint:
-        if args.static_checkpoint.resolve() == args.checkpoint.resolve():
-            command.error(
-                "the static checkpoint destination must differ from the source checkpoint"
-            )
-    if not calibrating and (args.static_checkpoint is None or not args.static_checkpoint.is_file()):
-        command.error("static checkpoint is missing; create it once with --calibrate")
-
-    model = LeNet5().float()
-    if calibrating:
-        load_checkpoint(model, args.checkpoint)
-    engine = simulator(args)
-    if engine.config.weight_bits != 4 or not engine.config.weight_signed:
-        command.error("this example stores signed 4-bit weights")
-    if engine.config.bw_e is not None:
-        command.error("this calibrated checkpoint uses INT scales; omit bw-e")
+    model = LeNet5().float().to(DEVICE)
+    if stage == "calibrate":
+        load_checkpoint(model, CHECKPOINT)
+    engine = Simulator(CONFIG, device=DEVICE)
     model = convert_model(
         model,
         engine,
-        include=args.include,
-        exclude=args.exclude,
-        training=False,
+        include=INCLUDE,
+        exclude=EXCLUDE,
         inplace=True,
     )
-    if calibrating:
-        dataset, indices = calibration_data(args)
-        # --limit applies to evaluation; calibration has its own explicit sample budget.
-        from argparse import Namespace
-
-        calibration_args = Namespace(**vars(args))
-        calibration_args.limit = None
+    if stage == "calibrate":
+        dataset = datasets.MNIST(DATA_ROOT, train=True, transform=transform, download=True)
+        generator = torch.Generator().manual_seed(CALIBRATION_SEED)
+        indices = torch.randperm(len(dataset), generator=generator)[:CALIBRATION_SAMPLES].tolist()
         calibration = calibrate(
             model,
-            loader(dataset, calibration_args),
+            DataLoader(Subset(dataset, indices), batch_size=BATCH_SIZE),
             activation_bits=engine.config.activation_bits,
         )
-        calibration.update(
-            split="train",
-            seed=args.calibration_seed,
-            indices_sha256=indices_sha256(indices),
-        )
-        if args.static_checkpoint:
-            payload = static_payload(model, engine, calibration, args, indices)
-            args.static_checkpoint.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(payload, args.static_checkpoint)
+        payload = static_payload(model, engine, calibration, indices)
+        CALIBRATED_CHECKPOINT.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(payload, CALIBRATED_CHECKPOINT)
+        print(f"Saved packed weights and fixed input scales: {CALIBRATED_CHECKPOINT}")
     else:
-        payload = torch.load(args.static_checkpoint, map_location="cpu", weights_only=True)
-        calibration = restore_static(model, payload, engine, args)
-    evaluation = classification_epoch(model, loader(mnist_dataset(args), args), args.device)
-    report(
-        args,
-        dict(
-            model="lenet5_mnist",
-            stage="inference",
-            quantization="static_signed_int4",
-            static_checkpoint=str(args.static_checkpoint) if args.static_checkpoint else None,
-            calibrated_now=bool(calibrating),
-            online_scale_estimation=False,
-            calibration=calibration,
-            evaluation=evaluation,
-        ),
-        engine,
-    )
+        payload = torch.load(STATIC_CHECKPOINT, map_location="cpu", weights_only=True)
+        restore_static(model, payload, engine)
+    test_data = datasets.MNIST(DATA_ROOT, train=False, transform=transform, download=True)
+    test_loader = DataLoader(test_data, batch_size=BATCH_SIZE, shuffle=False)
+    return evaluate(model, test_loader, device=DEVICE)
 
 
 if __name__ == "__main__":
-    main()
+    command = argparse.ArgumentParser(__doc__)
+    command.add_argument("--stage", choices=("calibrate", "inference"), default="inference")
+    main(command.parse_args().stage)

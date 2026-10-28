@@ -140,6 +140,9 @@ def convert_model(
         for projection, prefix in ((result.input, "ih"), (result.hidden, "hh")):
             projection.weight = getattr(source, "weight_" + prefix + suffix)
             projection.bias = getattr(source, "bias_" + prefix + suffix, None)
+            # Keep PyTorch checkpoint names as aliases of the same master parameters.
+            result.register_parameter("weight_" + prefix, projection.weight)
+            result.register_parameter("bias_" + prefix, projection.bias)
 
     def convert(module, name):
         if id(module) in excluded_ids:
@@ -229,6 +232,8 @@ def convert_model(
                 if index % directions:
                     suffix += "_reverse"
                 bind_cell(cell, module, suffix)
+                for attr in ("weight_ih", "weight_hh", "bias_ih", "bias_hh"):
+                    result.register_parameter(attr + suffix, getattr(cell, attr))
         replacements[id(module)] = result
         return result
 

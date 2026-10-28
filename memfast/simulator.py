@@ -518,6 +518,10 @@ class AnalogMatrix(nn.Module):
             if key in state and (type(state[key]) is not int or state[key] != getattr(self, key)):
                 raise ValueError("checkpoint logical matrix dimensions differ")
         loaded_config = dict(state["config"])
+        effects = dict(loaded_config["nonidealities"])
+        if effects.pop("output_noise", 0) != 0:
+            raise ValueError("checkpoint uses a removed noise model")
+        loaded_config["nonidealities"] = effects
         for name in ("rows_per_read", "input_slice", "weight_slice", "bw_e"):
             loaded_config.setdefault(name, None)
         loaded_config.setdefault("weight_signed", True)

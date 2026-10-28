@@ -112,13 +112,6 @@ def partial(q, packed, config, schedule, seed, event, begin, end):
                     mean = mean.permute(1, 0, 2).reshape_as(current)
                     variance = variance.permute(1, 0, 2).reshape_as(current)
                     current += mean + variance.sqrt() * normal(address, read_seed, 60)
-                if ni.output_noise:
-                    current += (
-                        ni.output_noise
-                        * config.current_unit
-                        * length
-                        * normal(address, read_seed, 50)
-                    )
                 totals[:, :, group] += adc(current * (amask * wmask), config, wi).long() * (sa * sw)
     dtype = torch.float64 if config.wide else torch.float32
     return totals.reshape(n, m * groups, width, c).to(dtype)

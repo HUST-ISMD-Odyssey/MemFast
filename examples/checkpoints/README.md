@@ -16,14 +16,13 @@ its original dataset terms.
 | SHA-256 | `d8eca094258b1a4850183ae5447ba199e9ddb39c6f246b5c68b2e42626f810a1` |
 
 ```bash
-python examples/03_lenet5_mnist.py --stage train --device cuda:0 \
-  --data-root data --download --epochs 8 --batch-size 128 --seed 135
-python examples/03_lenet5_mnist.py --device cuda:0 --data-root data --digital
-python examples/03_lenet5_mnist.py --device cuda:0 --data-root data
+python examples/03_lenet5_mnist.py --stage train
+python examples/03_lenet5_mnist.py
 ```
 
-The example resolves this checkpoint by default. User checkpoints do not need
-to live here. Save them to a chosen path and pass `--checkpoint PATH`.
+Edit `DATA_ROOT`, `DEVICE`, `EPOCHS` and other settings at the top of the
+example. Default inference resolves the supplied checkpoint. User checkpoints
+can live anywhere; set `CHECKPOINT` to their path.
 HAT checkpoints retain the original digital parameter names and can be loaded
 before conversion. Rebuild the matching architecture before loading strictly.
 
@@ -42,12 +41,9 @@ scale estimation. Its SHA-256 is
 `e7a8d182b4047e46a56ce5c9162e7c6eda131e62a5c2cfaf88ba127af219bb2c`.
 
 ```bash
-python examples/04_lenet5_mnist_static_quant.py --device cuda:0 --data-root data
-python examples/04_lenet5_mnist_static_quant.py --calibrate \
-  --device cuda:0 --data-root data --calibration-samples 1024 \
-  --checkpoint examples/checkpoints/lenet5_mnist.pt \
-  --static-checkpoint examples/output/lenet5_static_int4.pt
+python examples/04_lenet5_mnist_static_quant.py
+python examples/04_lenet5_mnist_static_quant.py --stage calibrate
 ```
 
-The first command loads the included static artifact. For a custom artifact,
-pass `--static-checkpoint PATH` during inference.
+The first command loads the included static artifact. Calibration writes to
+`CALIBRATED_CHECKPOINT`; set `STATIC_CHECKPOINT` to that path to restore it.

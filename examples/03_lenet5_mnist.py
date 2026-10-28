@@ -1,101 +1,88 @@
-"""LeNet-5: digital training, checkpoint restoration, CIM inference, and FP32 HAT."""
+"""LeNet-5 digital training, saved-weight inference and FP32 HAT."""
 
+import argparse
 from pathlib import Path
 
-from memfast import convert_model
+import torch
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+
+from memfast import Config, Nonidealities, Simulator, convert_model
 from memfast.models import LeNet5
 
-try:
-    from .common import (
-        classification_epoch,
-        load_checkpoint,
-        loader,
-        optimizer_for,
-        parser,
-        report,
-        save_checkpoint,
-        setup,
-        simulator,
-        training_options,
+if __package__:
+    from .common import evaluate, load_checkpoint, save_checkpoint, train
+else:
+    from common import evaluate, load_checkpoint, save_checkpoint, train
+
+EXAMPLES = Path(__file__).resolve().parent
+DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+DATA_ROOT = Path("data/mnist")
+CHECKPOINT = EXAMPLES / "checkpoints/lenet5_mnist.pt"
+TRAIN_CHECKPOINT = EXAMPLES / "output/lenet5_mnist.pt"
+HAT_CHECKPOINT = EXAMPLES / "output/lenet5_mnist_hat.pt"
+BATCH_SIZE = 128
+EPOCHS = 8
+LEARNING_RATE = 0.001
+INCLUDE = None
+# To convert only the first four eligible layers:
+# INCLUDE = ("features.0", "features.3", "classifier.0", "classifier.2")
+EXCLUDE = ()
+CONFIG = Config(
+    activation_bits=8,
+    weight_bits=8,
+    input_slice=(1,) * 8,
+    weight_slice=(1,) * 8,
+    array_size=(64, 64),
+    rows_per_read=64,
+    input_quant_gran=(1, None),
+    weight_quant_gran=(None, 1),
+    adc_bits=6,
+    bw_e=None,
+    nonidealities=Nonidealities(write_variation=0.02),
+)
+
+
+def main(stage="inference"):
+    torch.manual_seed(135)
+    transform = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Normalize((0.5,), (0.5,)),
+        ]
     )
-    from .common.mnist import mnist_dataset
-except ImportError:
-    from common import (
-        classification_epoch,
-        load_checkpoint,
-        loader,
-        optimizer_for,
-        parser,
-        report,
-        save_checkpoint,
-        setup,
-        simulator,
-        training_options,
-    )
-    from common.mnist import mnist_dataset
-
-
-DEFAULT_CHECKPOINT = Path(__file__).resolve().parent / "checkpoints/lenet5_mnist.pt"
-
-
-def main():
-    command = parser(__doc__)
-    training_options(command)
-    command.set_defaults(batch_size=128, epochs=8)
-    args = command.parse_args()
-    setup(args)
-    if args.stage != "train" and not args.smoke and args.checkpoint is None:
-        args.checkpoint = DEFAULT_CHECKPOINT
-    if args.stage in ("train", "hat") and args.save_checkpoint is None and not args.smoke:
-        args.save_checkpoint = (
-            Path("examples/output/lenet5_mnist.pt")
-            if args.stage == "train"
-            else Path("examples/output/lenet5_mnist_hat.pt")
-        )
-    # Architecture is defined in memfast/models/lenet.py; load its digital state first.
-    model = LeNet5()
-    load_checkpoint(model, args.checkpoint)
+    test_data = datasets.MNIST(DATA_ROOT, train=False, transform=transform, download=True)
+    test_loader = DataLoader(test_data, batch_size=BATCH_SIZE, shuffle=False)
+    model = LeNet5().float().to(DEVICE)
+    if stage != "train":
+        load_checkpoint(model, CHECKPOINT)
     state_keys = tuple(model.state_dict())
-    model = model.float().to(args.device)
-    engine = None
-    if args.stage != "train" and not args.digital:
-        engine = simulator(args)
-        # To use only the first four eligible layers, retaining the final classifier:
-        # include = ["features.0", "features.3", "classifier.0", "classifier.2"]
+    if stage in ("inference", "hat"):
+        simulator = Simulator(CONFIG, device=DEVICE)
         model = convert_model(
             model,
-            engine,
-            include=args.include,
-            exclude=args.exclude,
-            training=args.stage == "hat",
-            gradient_mode=args.gradient_mode,
+            simulator,
+            include=INCLUDE,
+            exclude=EXCLUDE,
+            training=stage == "hat",
             inplace=True,
         )
-    history = []
-    if args.stage in ("train", "hat"):
-        batches = loader(mnist_dataset(args, training=True), args, training=True)
-        optimizer = optimizer_for(model, args)
-        for _ in range(1 if args.smoke else args.epochs):
-            history.append(classification_epoch(model, batches, args.device, optimizer=optimizer))
+    if stage in ("train", "hat"):
+        train_data = datasets.MNIST(DATA_ROOT, train=True, transform=transform, download=True)
+        train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True)
+        optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+        train(model, train_loader, optimizer, device=DEVICE, epochs=EPOCHS)
         save_checkpoint(
             model,
-            args.save_checkpoint,
+            HAT_CHECKPOINT if stage == "hat" else TRAIN_CHECKPOINT,
             state_keys=state_keys,
             architecture="lenet5_mnist",
             normalization=dict(mean=[0.5], std=[0.5]),
-            seed=args.seed,
-            epochs=args.epochs,
-            stage=args.stage,
-            backward_dtype="float32",
         )
-    evaluation = classification_epoch(model, loader(mnist_dataset(args), args), args.device)
-    args.digital = args.stage == "train" or args.digital
-    report(
-        args,
-        dict(model="lenet5_mnist", stage=args.stage, training=history, evaluation=evaluation),
-        engine,
-    )
+    return evaluate(model, test_loader, device=DEVICE)
 
 
 if __name__ == "__main__":
-    main()
+    command = argparse.ArgumentParser(__doc__)
+    command.add_argument("--stage", choices=("train", "inference", "hat"), default="inference")
+    main(command.parse_args().stage)
