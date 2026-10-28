@@ -207,7 +207,7 @@ python -m jupyter lab examples/notebooks
 | --- | --- |
 | `01_custom_model_mnist.ipynb` | Define, train, save/load, compare digital and CIM |
 | `02_pretrained_mobilenet_imagenet.ipynb` | Pretrained model, full/partial CIM and accuracy |
-| `03_dft_image_denoising.ipynb` | DFT matrices on CIM, image denoising and PSNR |
+| `03_dft_image_denoising.ipynb` | DFT matrices on CIM, periodic stripe removal and PSNR |
 | `04_vgg_nonidealities.ipynb` | Device models, independent parameter sweeps and full-test tables |
 | `05_vgg_mixed_precision.ipynb` | User-defined layer precisions and full-test comparisons |
 
@@ -255,15 +255,20 @@ The MobileNetV2 notebook evaluates all 50,000 ImageNet validation images:
 These CIM runs use A8W8 INT, binary slices, 64x64 arrays, ADC6 and
 write variation 0.02. Other effects are disabled.
 
-The 256x256 DFT photograph uses Gaussian input noise, standard deviation
-0.22 and seed 135, followed by a fixed Gaussian low-pass filter:
+The 256x256 DFT photograph has additive periodic stripes of amplitude 0.18,
+with 12 cycles across its width. A notch filter rejects the two known
+interference frequencies. Both NumPy and CIM subtract the observed image
+mean before transforming and restore it after the inverse:
 
 | Reconstruction | PSNR |
 | --- | ---: |
-| Noisy image | 13.929 dB |
-| NumPy DFT and inverse | 22.554 dB |
-| CIM, ideal devices | 22.375 dB |
-| CIM, write variation 0.02 | 22.375 dB |
+| Striped input | 17.905 dB |
+| NumPy DFT notch filter and inverse | 50.876 dB |
+| CIM, ideal devices | 46.241 dB |
+| CIM, write variation 0.05 | 33.501 dB |
 
-CIM uses A8W8, binary slices, 64x64 arrays and ADC8. The notebook displays
-the images and filter response, with an 8.446 dB CIM reconstruction gain.
+CIM uses A8W8, binary slices, 64x64 arrays, ADC8, per-64-value input
+scales, per-output-channel weight scales and seed 135. All forward/inverse
+DFT matrix products run through CIM; centering and frequency masking are
+digital. The notebook retains the images and spectrum. With write variation
+0.05, reconstruction improves PSNR by 15.596 dB over the striped input.

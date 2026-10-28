@@ -149,8 +149,8 @@ Matching cached selections are reused on later runs.
 ## Documentation And Examples
 
 - [DFT image denoising notebook](examples/notebooks/03_dft_image_denoising.ipynb):
-  denoise a bundled photograph with real CIM-mapped DFT matrices; compare NumPy,
-  ideal devices, and write variation of 0.02 using reconstructions and PSNR.
+  remove periodic stripes with real CIM-mapped DFT matrices; compare NumPy,
+  ideal devices, and write variation of 0.05 using reconstructions and PSNR.
 - [User guide](docs/user-guide.md): configuration, physical models, sampling,
   tuning, and reproducibility.
 - [Examples](examples/README.md): matrix operations, model conversion,
