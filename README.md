@@ -11,9 +11,8 @@ in bounded groups.
 
 ## Capabilities
 
-- Signed INT and block floating-point (BFP) quantization, including 10-, 16-,
-  and 20-bit configurations; imported unsigned affine weights with digital
-  zero-point compensation.
+- Configurable-precision INT and block floating-point (BFP) simulation,
+  including common 4-, 8-, and 16-bit formats.
 - Independent input and weight slice layouts, including multibit cells and
   input levels such as `(1,1,2,2,2)` for eight-bit data.
 - Independent physical array geometry, rows per ADC read, quantization groups,
@@ -57,8 +56,9 @@ config = Config(
     nonidealities=Nonidealities(write_variation=0.02),
 )
 simulator = Simulator(config, device="cpu")
-array = simulator.map(torch.randn(32, 128))
-output = array(torch.randn(4, 128))
+A = torch.randn(4, 128)
+B = torch.randn(128, 32)
+C = simulator.mm(A, B)
 ```
 
 `array_size` defines the physical array. `rows_per_read` defines how many rows
@@ -66,14 +66,17 @@ are summed before each ADC conversion. Quantization groups define scale
 sharing. Each ADC partial is reconstructed and multiplied by its own input and
 weight scales before digital accumulation.
 
-For a general matrix product `A @ B`, program `B.T` once and reuse it:
+Matrix products use the same operand order and shapes as PyTorch:
 
 ```python
-A = torch.randn(16, 128, device=simulator.device)
-B = torch.randn(128, 32, device=simulator.device)
-mapped_B = simulator.map(B.T, name="B")
-C = mapped_B(A)
+import memfast
+
+C = memfast.mm(A, B)
+C = simulator.mm(A, B)  # Use this simulator's configuration.
 ```
+
+The simulator handles weight programming and reuses it while `B` is unchanged.
+Operand order matches `torch.mm`; no manual transpose or matrix name is required.
 
 Set `bw_e=None` for INT or an exponent width such as `bw_e=8` for BFP.
 Slice layouts are ordered from most significant to least significant;
@@ -85,6 +88,17 @@ The [user guide](docs/user-guide.md) defines mapping, exponent ranges, and
 accumulator limits.
 
 ## Network Simulation
+
+Construct layers with PyTorch's argument order and ordinary backward support:
+
+```python
+from memfast import nn
+
+linear = nn.Linear(128, 32, config=config)
+conv = nn.Conv2d(3, 16, 3, padding=1, config=config)
+```
+
+For an existing PyTorch network, load its checkpoint and convert:
 
 ```python
 from memfast import convert_model
@@ -143,8 +157,6 @@ Matching cached selections are reused on later runs.
   training, vision models, recurrent networks, and language-model evaluation.
 - [Project layout](docs/project-layout.md): package responsibilities and
   example configuration.
-- [Example results](docs/example-results.md): accuracy and reconstruction results
-  with their datasets and simulation settings.
 
 ## Development
 

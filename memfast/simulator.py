@@ -5,6 +5,7 @@ import itertools
 import json
 import math
 import time
+import weakref
 from dataclasses import asdict
 from pathlib import Path
 
@@ -105,13 +106,69 @@ class Simulator:
         self._selections = {}
         self._fingerprint = source_hash()
         self._next_id = 0
+        self._matrix_cache = {}
 
     def map(self, weight, *, bias=None, name=None):
-        """Program a PyTorch [out_features, in_features] weight matrix."""
+        """Low-level layer-weight adapter using PyTorch [O,K] weight layout.
+
+        Use ``mm(A, B)`` for a matrix product in its natural operand order.
+        """
         if name is None:
             name = f"matrix.{self._next_id}"
             self._next_id += 1
         return AnalogMatrix(weight, self, bias=bias, name=name)
+
+    def mm(self, input, mat2, *, out=None):
+        """Simulate a two-dimensional matrix product, following torch.mm."""
+        from .functional import mm
+
+        return mm(input, mat2, simulator=self, out=out)
+
+    def matmul(self, input, other, *, out=None):
+        """Simulate a vector, matrix, or broadcast batch product like torch.matmul."""
+        from .functional import matmul
+
+        return matmul(input, other, simulator=self, out=out)
+
+    def _matrix_for(self, matrix):
+        """Validate current packed weights before reusing RHS programming."""
+        identity = id(matrix)
+        record = self._matrix_cache.get(identity)
+        same_tensor = record is not None and record[0]() is matrix
+        metadata = (
+            tuple(matrix.shape),
+            tuple(matrix.stride()),
+            matrix.storage_offset(),
+            matrix.data_ptr(),
+            matrix.dtype,
+            matrix.device,
+        )
+        previous = record[2] if same_tensor else None
+        # NumPy aliases and .data writes need not advance the tensor version.
+        # Mapping uses device-local weight_tiles and retains no floating RHS copy.
+        programmed = self.map(matrix.T, name=None if previous is None else previous.name)
+        if (
+            same_tensor
+            and record[1] == metadata
+            and previous.config == self.config
+            and previous.packed.device == self.device
+            and torch.equal(previous.packed, programmed.packed)
+            and torch.equal(previous.weight_scale, programmed.weight_scale)
+        ):
+            return previous
+        if previous is not None:
+            programmed._event = previous._event
+        owner = weakref.ref(self)
+
+        def release(reference):
+            simulator = owner()
+            if simulator is not None:
+                cached = simulator._matrix_cache.get(identity)
+                if cached is not None and cached[0] is reference:
+                    simulator._matrix_cache.pop(identity, None)
+
+        self._matrix_cache[identity] = (weakref.ref(matrix, release), metadata, programmed)
+        return programmed
 
     def map_quantized(self, codes, scales, *, zero_points=None, bias=None, name=None):
         """Import integer [O,K] weights as ``scales * (codes - zero_points)``.
@@ -476,6 +533,26 @@ class AnalogMatrix(nn.Module):
         if type(event) is not int or not 0 <= event < 2**63:
             raise ValueError("event must be a nonnegative signed 64-bit integer")
         self._event = event
+
+    @torch.no_grad()
+    def update_weight(self, matrix):
+        """Reprogram a right-hand [K,O] matrix without replacing this module.
+
+        Shape, physical settings, fixed input scales, and sampling identity are
+        retained. Read events restart at zero after programming.
+        """
+        if not isinstance(matrix, torch.Tensor) or tuple(matrix.shape) != (
+            self.in_features,
+            self.out_features,
+        ):
+            raise ValueError("replacement matrix must have the original [K,O] shape")
+        replacement = AnalogMatrix(matrix.T, self.simulator, bias=self.bias, name=self.name)
+        self.packed.copy_(replacement.packed)
+        self.weight_scale.copy_(replacement.weight_scale)
+        self.zero_correction = None
+        self._prepared.clear()
+        self.reset_read()
+        return self
 
     def _execute(self, q, xscale, schedule, event, stable=False):
         runner = reference.partial

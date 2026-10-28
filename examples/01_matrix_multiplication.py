@@ -1,4 +1,4 @@
-"""Program matrices with configurable slices, INT/BFP, geometry, and scale groups."""
+"""Simulate matrix multiplication with configurable quantization and CIM arrays."""
 
 import torch
 
@@ -24,28 +24,22 @@ def main():
         signed = name == "input_slice" or args.weight_signed
         if widths is not None and ((signed and widths[0] != 1) or sum(widths) != bits):
             command.error(f"--{name.replace('_', '-')} must start with 1 and sum to {bits}")
-    weight = torch.randn(args.out_features, args.in_features, device=args.device)
-    x = torch.randn(args.vectors, args.in_features, device=args.device)
+    a = torch.randn(args.vectors, args.in_features, device=args.device)
+    b = torch.randn(args.in_features, args.out_features, device=args.device)
     engine = None if args.digital else simulator(args)
     if engine is not None and not engine.config.weight_signed:
-        weight = weight.abs()
-    expected = x @ weight.T
+        b = b.abs()
+    expected = torch.mm(a, b)
     if engine is None:
         result = expected
-        replay_equal = None
     else:
-        array = engine.map(weight, name="example")
-        result = array(x)
-        array.reset_read()
-        replay_equal = torch.equal(result, array(x))
-        if not replay_equal:
-            raise AssertionError("reset_read did not replay the matrix output")
+        result = engine.mm(a, b)
     if not torch.isfinite(result).all():
         raise FloatingPointError("nonfinite matrix output")
     error = (result - expected).norm() / expected.norm().clamp_min(1e-12)
     report(
         args,
-        dict(shape=list(result.shape), relative_l2=float(error), read_replay_equal=replay_equal),
+        dict(shape=list(result.shape), relative_l2=float(error)),
         engine,
     )
 

@@ -13,13 +13,7 @@ its original dataset terms.
 | Training arithmetic | PyTorch FP32, digital, CUDA |
 | Evaluation | 10,000 MNIST test images, no augmentation |
 | Digital accuracy | 9,849 / 10,000 = 98.49% |
-| Default CIM accuracy | 9,850 / 10,000 = 98.50% |
 | SHA-256 | `d8eca094258b1a4850183ae5447ba199e9ddb39c6f246b5c68b2e42626f810a1` |
-
-The CIM result uses A8W8 INT, binary slices, 64x64 arrays, 64 rows per read,
-ADC6, per-vector input scales, per-output-channel weight scales, and
-write variation 0.02. All other nonidealities are disabled. The result is one
-fixed programming realization with seed 135.
 
 ```bash
 python examples/03_lenet5_mnist.py --stage train --device cuda:0 \

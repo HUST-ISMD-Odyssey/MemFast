@@ -1,4 +1,4 @@
-"""VGG inference on CIFAR-10 or CIFAR-100 using a software-trained checkpoint."""
+"""Run VGG inference on CIFAR-10 or CIFAR-100 from a trained checkpoint."""
 
 if __package__:
     from .common import classification_epoch, load_checkpoint, loader, report, simulator

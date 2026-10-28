@@ -1,18 +1,20 @@
 # Project Layout
 
-The public API has three levels: program a matrix, convert a PyTorch layer,
-or convert a complete network. Model and dataset choices belong in examples;
+The public API offers matrix multiplication, PyTorch-style layers,
+and complete network conversion. Model and dataset choices belong in examples;
 device and quantization behavior belongs in the simulator.
 
 | Path | Responsibility |
 | --- | --- |
 | `memfast/config.py` | Validated physical geometry, scales, slices, ADCs and nonidealities |
+| `memfast/functional.py` | PyTorch-order `mm` and `matmul`, broadcasting and FP32 backward |
 | `memfast/quantization.py` | INT/BFP codes and scale groups |
 | `memfast/simulator.py` | Matrix programming, forward, schedule selection and persistent cache |
 | `memfast/reference.py` | Readable PyTorch implementation of array currents and ADCs |
 | `memfast/cuda.py`, `kernels.cu` | CUDA loading, compilation and accelerated kernels |
 | `memfast/random.py` | Reproducible physical random coordinates |
 | `memfast/nn/linear.py` | Inference Linear |
+| `memfast/nn/modules.py` | PyTorch-style trainable Linear and Conv2d constructors |
 | `memfast/nn/convolution.py` | Grouped and depthwise Conv2d |
 | `memfast/nn/recurrent.py` | Stateful RNN and GRU layers |
 | `memfast/nn/training.py` | Trainable master weights, analog forward and FP32 HAT surrogate |
@@ -23,12 +25,12 @@ device and quantization behavior belongs in the simulator.
 | `examples/configs/` | Optional JSON configurations, one per tutorial |
 | `examples/checkpoints/` | Small released digital/static LeNet checkpoints and provenance |
 | `examples/notebooks/` | Consecutive learning workflows and intermediate results |
-| `docs/` | User manual, project layout and example results |
+| `docs/` | User manual and project layout |
 
 Example names use `NN_model_dataset.py`; general matrix and language benchmark
 names describe the operation when there is no single fixed dataset.
-VGG software training has a separate tutorial; its inference tutorial focuses
-on checkpoint restoration and conversion. MLP and LeNet use `--stage` for
+VGG inference is followed by a separate HAT example that loads a checkpoint
+and trains with analog forward values. MLP and LeNet use `--stage` for
 their training, inference and HAT workflows.
 Task libraries remain optional; torch and torchvision are standard dependencies.
 

@@ -16,6 +16,6 @@ jobs:
       - run: python -m ruff check .
       - run: python -m ruff format --check .
       - run: python -m build
-      - run: python examples/01_matrix.py --smoke
+      - run: python examples/01_matrix_multiplication.py --smoke
       - run: python examples/02_mlp_mnist.py --stage train --smoke
       - run: python examples/03_lenet5_mnist.py --smoke

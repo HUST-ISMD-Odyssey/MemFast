@@ -2,25 +2,56 @@
 
 ## Matrix And Network Interfaces
 
-`Simulator.map(weight, bias=None, name=None)` programs a matrix with PyTorch
-weight layout `[output_features, input_features]`. Its returned module accepts
-inputs `[..., input_features]` and returns `[..., output_features]`.
-The last dimension is the reduction dimension. Leading dimensions are flattened
-into read vectors for one invocation.
-
-For a non-network application with `A[N,K]` and `B[K,O]`,
-`Simulator.map(B.T)(A)` simulates `A @ B`. Keep the programmed module when
-reusing `B` so later calls perform reads without reprogramming its weights.
-Quantization, slicing, ADC conversion and the selected nonidealities apply
-equally to matrix and neural-network applications.
+Use `memfast.mm(A, B)` as you would use `torch.mm(A, B)`: both operands
+are matrices, with shapes `[N,K]` and `[K,O]`. `memfast.matmul(A, B)` also
+accepts vectors and broadcast batch dimensions, following `torch.matmul`.
+No transpose, matrix name or separate programming call is required.
 
 ```python
 import torch
-from memfast import Config, Simulator, convert_model
+import memfast
+from memfast import Config, Simulator
+
+A = torch.randn(16, 256, device="cuda:0", requires_grad=True)
+B = torch.randn(256, 128, device="cuda:0", requires_grad=True)
+C = memfast.mm(A, B)
+C.sum().backward()
 
 sim = Simulator(Config(), device="cuda:0")
-array = sim.map(torch.randn(128, 256), name="projection")
-y = array(torch.randn(2, 16, 256, device=sim.device))
+C = sim.mm(A, B)
+```
+
+An explicit simulator shares configuration and automatically reuses programmed
+weights while its quantized codes and scales are unchanged. Device-local checks
+also detect changes through NumPy aliases, `.data`, or optimizer updates.
+Forward uses the physical array model; backward uses the FP32 quantized-operand
+surrogate described below. Device effects are not differentiated.
+For broadcast products, each distinct right-hand matrix has its own program;
+vectors that share it are quantized together in flattened row order.
+
+Linear and Conv2d use the same matrix engine with their own PyTorch weight
+layouts. Their public constructors follow PyTorch's argument order:
+
+```python
+from memfast import nn
+
+linear = nn.Linear(256, 128, bias=True, device="cuda:0")
+conv = nn.Conv2d(3, 32, 3, stride=1, padding=1, device="cuda:0")
+output = linear(A)
+output.sum().backward()
+```
+
+Pass `config=config` or `simulator=sim` as additional keyword arguments.
+The layers expose trainable `.weight` and `.bias`, and work with ordinary
+PyTorch optimizers. `layer.update_weight(new_weight)` copies PyTorch-layout
+weights without replacing the optimizer parameters; `layer.update_weight()`
+refreshes programming from the current parameters. Ordinary forward calls
+already refresh programming after optimizer updates.
+
+For an existing network, load its digital checkpoint and convert:
+
+```python
+from memfast import convert_model
 
 analog = convert_model(model.eval(), sim, exclude=("classifier",))
 ```
@@ -63,12 +94,10 @@ exact programmed codes, scales, and bias storage. Inputs and outputs still
 follow the network dtype. Select the simulator device before mapping; moving
 a mapped network to a different device requires remapping with that device.
 
-The modules implement inference. Program new weights by mapping or converting
-the updated digital weights again.
-
 ### Layers, Models, And Training
 
-`memfast.nn` contains inference layers (`AnalogLinear`, `AnalogConv2d`),
+`memfast.nn` contains PyTorch-style trainable `Linear` and `Conv2d`,
+compact inference adapters (`AnalogLinear`, `AnalogConv2d`),
 recurrent RNN/GRU layers, trainable layers
 (`HATLinear`, `HATConv2d`), conversion, and read-event utilities.
 `memfast.models` supplies MLP and recurrent classifiers, CIFAR and ImageNet
@@ -76,9 +105,9 @@ architecture factories, and local language-model and detector loaders.
 The numerical engine remains independent of these model libraries.
 
 ```python
-from memfast.nn import HATLinear, convert_model
+from memfast.nn import Linear, convert_model
 
-layer = HATLinear(torch.nn.Linear(128, 32), sim)
+layer = Linear(128, 32, simulator=sim)
 trainable = convert_model(model, sim, training=True, gradient_mode="quantized")
 optimizer = torch.optim.Adam(trainable.parameters(), lr=1e-3)
 ```
@@ -95,6 +124,10 @@ that dtype when a caller supplies a different one.
 Neither option differentiates the noise, faults, or ADC response.
 Convolution gradients use unfolded patches directly. Optimizer parameters and
 registered buffers keep stable identities for distributed training.
+
+The low-level compatibility interface `Simulator.map(weight)` accepts layer
+weights in `[O,K]` layout. It is used by the layer adapters; application matrix
+products should use `mm` or `matmul`.
 
 Converted recurrent networks preserve stacked and bidirectional execution,
 hidden states, the RNN tanh/ReLU nonlinearity and PyTorch GRU gate equations.

@@ -1,6 +1,6 @@
 include LICENSE
 recursive-include docs *.md
-recursive-include examples *.py *.md *.json *.ipynb *.pt
+recursive-include examples *.py *.md *.json *.ipynb *.pt *.png
 prune examples/output
 prune examples/notebooks/output
 global-exclude __pycache__ *.py[cod]
